@@ -98,6 +98,8 @@ from cinder.volume.drivers.dell_emc.vnx import common as \
     cinder_volume_drivers_dell_emc_vnx_common
 from cinder.volume.drivers.dell_emc import xtremio as \
     cinder_volume_drivers_dell_emc_xtremio
+from cinder.volume.drivers.dmclone import driver as \
+    cinder_volume_drivers_dmclone_driver
 from cinder.volume.drivers.fujitsu.eternus_dx import eternus_dx_common as \
     cinder_volume_drivers_fujitsu_eternus_dx_eternusdxcommon
 from cinder.volume.drivers.fungible import driver as \
@@ -367,6 +369,7 @@ def list_opts():
                 cinder_volume_drivers_dell_emc_unity_driver.UNITY_OPTS,
                 cinder_volume_drivers_dell_emc_vnx_common.VNX_OPTS,
                 cinder_volume_drivers_dell_emc_xtremio.XTREMIO_OPTS,
+                cinder_volume_drivers_dmclone_driver.driver_opts,
                 cinder_volume_drivers_fujitsu_eternus_dx_eternusdxcommon.
                 FJ_ETERNUS_DX_OPT_opts,
                 cinder_volume_drivers_hitachi_hbsdcommon.COMMON_VOLUME_OPTS,
