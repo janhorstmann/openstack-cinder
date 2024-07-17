@@ -253,6 +253,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         rpcapi = volume_rpcapi.VolumeAPI()
                         rpcapi.delete_volume(ctxt, src_volume)
 
+                    if volume['status'] == 'maintenance':
+                        self.dmsetup.remove(self._dm_target_name(volume))
+                        volume['status'] = 'available'
+
                     volume.update({'migration_status': 'success'})
                     volume.save()
 
@@ -329,12 +333,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         ]
                     )
                 )
-            if volume['migration_status'] == 'migrating':
-                self.dmsetup.message(
-                    self._dm_target_name(volume),
-                    '0',
-                    'enable_hydration'
-                )
         except Exception:
             with excutils.save_and_reraise_exception():
                 LOG.exception(
@@ -357,10 +355,31 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     self._metadata_dev_name(volume)
                 )
                 super(DMCloneVolumeDriver, self).delete_volume(volume)
+        if volume['migration_status'] == 'migrating':
+            LOG.debug(
+                'Starting migration of volume %(volume)s',
+                {'volume': volume}
+            )
+            self.dmsetup.message(
+                self._dm_target_name(volume),
+                '0',
+                'enable_hydration'
+            )
 
     # #######  Interface methods for DataPath (Connector) ########
 
     def initialize_connection(self, volume, connector, **kwargs):
+        LOG.debug(
+            'Initializing connection for volume %(volume)s',
+            {'volume': volume}
+        )
+        if not (
+            volume['migration_status'] is None
+            or volume['migration_status'] == 'success'
+        ):
+            raise exception.InvalidVolume(
+                reason='Volume is still migrating'
+            )
         LOG.debug('Initializing connection for connector: %(connector)s',
                   {'connector': connector})
         if connector['host'] == volume_utils.extract_host(volume['host'],
@@ -398,13 +417,19 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 constants.VOLUME_BINARY
             )
 
-            if volume.status == 'reserved':
+            if volume['status'] == 'reserved':
                 migration_status = 'migrating'
 
-            elif volume.status == 'in-use':
+            elif volume['status'] == 'in-use':
                 migration_status = 'starting'
             else:
-                migration_status = None
+                raise exception.InvalidInput(
+                    reason =
+                    'Unexpected volume status {0} for volume {1}'.format(
+                        volume['status'],
+                        volume['id']
+                    )
+                )
 
             new_volume = objects.Volume(
                 context=ctxt,
@@ -420,6 +445,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 project_id = volume.project_id,
             )
 
+            # TODO: Get lock for new_volume
             new_volume.create()
             LOG.debug(
                 'Created destination volume object: %(volume)s ',
@@ -497,6 +523,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             # volume references the newly created volume on the destination
             # and vice versa
             self._switch_volumes(volume, new_volume)
+            # TODO: Release lock for new_volume
 
         return {
             'driver_volume_type': 'local',
@@ -512,6 +539,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         :param connector: A dictionary describing the connection with details
                           about the initiator. Can be None.
         """
+        LOG.debug(
+            'Terminating connection for volume %(volume)s',
+            {'volume': volume}
+        )
         if (
             volume['migration_status']
             and volume['migration_status'].startswith('target:')
@@ -538,7 +569,15 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 volume['migration_status'] = None
                 volume.save()
             elif volume['status'] == 'in-use':
-                # NOTE(jhorstmann): Live-migration scenario.
+                # NOTE(jhorstmann): This point is reached either at the end of
+                # a live-migration or when detaching a volume that is still
+                # migrating. In the latter case cinder does not update the
+                # volume status to detaching.
+                # The source volume is required to detect the actual state
+                src_volume = self._find_src_volume(volume)
+                ctxt = context.get_admin_context()
+                rpcapi = volume_rpcapi.VolumeAPI()
+
                 # The connector is required to decide what to do
                 if not connector:
                     raise exception.InvalidConnectorException(
@@ -548,34 +587,47 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     volume['host'],
                     'host'
                 ):
-                    # NOTE(jhorstmann): Disconnection on this host means
-                    # live-migration has failed and we need to clean up
-                    src_volume = self._find_src_volume(volume)
-                    self._switch_volumes(volume, src_volume)
-                    self.dmsetup.remove(
-                        self._dm_target_name(src_volume)
-                    )
-                    self.vg_metadata.delete(
-                        self._metadata_dev_name(src_volume)
-                    )
-                    self._disconnect_volume(volume)
-                    LOG.debug(
-                        'Calling RPC API to delete volume: '
-                        '%(volume)s',
-                        {'volume': src_volume}
-                    )
-                    ctxt = context.get_admin_context()
-                    rpcapi = volume_rpcapi.VolumeAPI()
-                    rpcapi.delete_volume(ctxt, src_volume)
-                    volume['migration_status'] = None
-                    volume.save()
+                    # NOTE(jhorstmann): Disconnection on this host means either
+                    # live-migration has failed and we need to clean up or a
+                    # volume is being detached while still migrating.
+                    # This will be decided by the migration_status of the
+                    # source volume
+                    if src_volume['migration_status'] == 'starting':
+                        # NOTE(jhorstmann): Data migration has not started yet
+                        # and everything may be cleaned up
+                        self._switch_volumes(volume, src_volume)
+                        self.dmsetup.remove(
+                            self._dm_target_name(src_volume)
+                        )
+                        self.vg_metadata.delete(
+                            self._metadata_dev_name(src_volume)
+                        )
+                        self._disconnect_volume(volume)
+                        LOG.debug(
+                            'Calling RPC API to delete volume: '
+                            '%(volume)s',
+                            {'volume': src_volume}
+                        )
+                        rpcapi.delete_volume(ctxt, src_volume)
+                        volume['migration_status'] = None
+                        volume.save()
+                    elif src_volume['migration_status'] == 'migrating':
+                        # NOTE(jhorstmann): Data migration has already started
+                        # and writes could have landed on the new volume.
+                        # We do not want to chain migrations, so the volume is
+                        # set to maintenance so that it cannot be attached
+                        # until migration is done and the state reset
+                        LOG.info(
+                            'Volume %(id)s still migrating during termination '
+                            'of connection, setting status to maintenance',
+                            {'id': volume['id']}
+                        )
+                        volume['status'] = 'maintenance'
+                        volume.save()
                 else:
                     # NOTE(jhorstmann): Disconnection on the remote host means
                     # live-migration has succeded and we need to actually
                     # disconnect the remote volume and start hydration
-                    src_volume = self._find_src_volume(volume)
-                    ctxt = context.get_admin_context()
-                    rpcapi = volume_rpcapi.VolumeAPI()
                     rpcapi.terminate_connection(ctxt, src_volume, connector)
                     src_volume['migration_status'] = 'migrating'
                     src_volume.save()
@@ -584,11 +636,22 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         '0',
                         'enable_hydration'
                     )
-        # TODO: Consider if this should be a general `else`
-        elif volume['status'] == 'detaching':
+        else:
             self.dmsetup.remove(self._dm_target_name(volume))
-        elif (
-            volume['status'] == 'maintenance'
-            and volume['migration_status'] == 'starting'
-        ):
-            self.dmsetup.remove(self._dm_target_name(volume))
+        # elif volume['status'] == 'detaching':
+        #     self.dmsetup.remove(self._dm_target_name(volume))
+        # elif volume['status'] == 'detaching':
+        #     self.dmsetup.remove(self._dm_target_name(volume))
+        # elif (
+        #     volume['status'] == 'maintenance'
+        #     and volume['migration_status'] == 'starting'
+        # ):
+        #     self.dmsetup.remove(self._dm_target_name(volume))
+        # else:
+        #     raise exception.InvalidInput(
+        #         reason =
+        #         'Unexpected volume status {0} for volume {1}'.format(
+        #             volume['status'],
+        #             volume['id']
+        #         )
+        #     )
