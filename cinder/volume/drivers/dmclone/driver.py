@@ -59,7 +59,120 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         self.vg_metadata = brick_lvm.LVM('vg0', root_helper)
 
     def check_for_setup_error(self):
+        LOG.debug('Running check for setup error')
         super(DMCloneVolumeDriver, self).check_for_setup_error()
+
+        # NOTE(jhorstmann): Find attached volumes
+        host = self.hostname + '@' + self.backend_name
+        ctxt = context.get_admin_context()
+        volumes = objects.volume.VolumeList.get_all_by_host(
+            ctxt,
+            host
+        )
+
+        LOG.debug(
+            'Received volume list for host %(host)s: %(volumes)s',
+            {'host': host, 'volumes': volumes}
+        )
+        for volume in volumes:
+            # NOTE(jhorstmann): Create dm targets if they do not exist
+            try:
+                self.dmsetup.status(
+                    self._dm_target_name(volume)
+                )
+            except Exception:
+                # TODO: Check for exact error
+                if (
+                    volume['migration_status']
+                    and volume['migration_status'].startswith('target:')
+                ):
+                    if self.vg_metadata.get_volume(
+                        self._metadata_dev_name(volume)
+                    ):
+                        src_volume = self._find_src_volume(volume)
+                        connector, connector_data = self._get_connector(
+                            src_volume
+                        )
+                        src_volume_handle = connector.connect_volume(
+                            connector_data
+                        )
+                        LOG.debug(
+                            'Obtained handle for source volume %(volume)s: '
+                            '%(handle)s',
+                            {'volume': src_volume,
+                             'handle': src_volume_handle}
+                        )
+
+                        if src_volume['migration_status'] == 'starting':
+                            self.dmsetup.create(
+                                self._dm_target_name(volume),
+                                ' '.join(
+                                    [
+                                        '0',
+                                        str(volume['size'] * 2097152),
+                                        'clone',
+                                        # TODO: remove hardcoded VG
+                                        '/dev/vg0/' + self._metadata_dev_name(
+                                            volume),
+                                        self.local_path(volume),
+                                        src_volume_handle['path'],
+                                        '8',
+                                        '1',
+                                        'no_hydration'
+                                    ]
+                                )
+                            )
+                        elif src_volume['migration_status'] == 'migrating':
+                            self.dmsetup.create(
+                                self._dm_target_name(volume),
+                                ' '.join(
+                                    [
+                                        '0',
+                                        str(volume['size'] * 2097152),
+                                        'clone',
+                                        # TODO: remove hardcoded VG
+                                        '/dev/vg0/' + self._metadata_dev_name(
+                                            volume),
+                                        self.local_path(volume),
+                                        src_volume_handle['path'],
+                                        '8',
+                                        '0',
+                                    ]
+                                )
+                            )
+                    else:
+                        volume['status'] = 'maintenance'
+                        volume.save()
+                        raise exception.InvalidVolume(
+                            reason='Volume is still migrating, but has no '
+                            'metadata device'
+                        )
+                else:
+                    self.dmsetup.create(
+                        self._dm_target_name(volume),
+                        ' '.join(
+                            [
+                                '0',
+                                str(volume['size'] * 2097152),
+                                'linear',
+                                self.local_path(volume),
+                                '0'
+                            ]
+
+                        )
+                    )
+
+            # NOTE(jhorstmann): Make sure source volumes are exported
+            if (
+                volume['migration_status']
+                and (
+                    volume['migration_status'] == 'starting'
+                    or
+                    volume['migration_status'] == 'migrating'
+                )
+            ):
+                self.ensure_export(ctxt, volume)
+
         self.migration_monitor = loopingcall.FixedIntervalLoopingCall(
             self._migration_monitor
         )
@@ -157,16 +270,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         LOG.debug(
             'Starting migration monitor'
         )
-        try:
-            host = CONF.host + '@' + self.capabilities['volume_backend_name']
-        except KeyError:
-            # NOTE(jhorstmann): Capabilities seem to be initialized
-            # asynchronously, so just skip running until they are available
-            LOG.debug(
-                'Could not find `volume_backend_name` in capablities. Maybe '
-                'capabilities have not been initialized yet'
-            )
-            return
+        host = self.hostname + '@' + self.backend_name
         ctxt = context.get_admin_context()
         migrating_volumes = [
             v for v in objects.volume.VolumeList.get_all_by_host(
@@ -254,7 +358,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         rpcapi.delete_volume(ctxt, src_volume)
 
                     if volume['status'] == 'maintenance':
-                        self.dmsetup.remove(self._dm_target_name(volume))
                         volume['status'] = 'available'
 
                     volume.update({'migration_status': 'success'})
@@ -271,20 +374,22 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         data["storage_protocol"] = self.protocol
         self._stats.update(data)
 
-    # def check_for_setup_error(self):
-    #     LOG.debug('Running check for setup error'})
-    #     super(DMCloneVolumeDriver, self).check_for_setup_error()
-    #     # NOTE(jhorstmann): Find attached volumes
-    #     ctxt = context.get_admin_context()
-    #     host = 
-    #     volumes = objects.volume.VolumeList.get_all_by_host(
-    #         ctxt,
-    #         host
-    #     )
-
     def create_volume(self, volume):
         LOG.debug('Creating volume: %(volume)s', {'volume': volume})
         super(DMCloneVolumeDriver, self).create_volume(volume)
+        self.dmsetup.create(
+            self._dm_target_name(volume),
+            ' '.join(
+                [
+                    '0',
+                    str(volume['size'] * 2097152),
+                    'linear',
+                    self.local_path(volume),
+                    '0'
+                ]
+
+            )
+        )
         try:
             if volume['migration_status'] in ['starting', 'migrating']:
                 # NOTE(jhorstmann): Use the volume's user-facing ID here
@@ -327,7 +432,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 # GiByte / 512 Byte/sector
                 # = 1024 * 1024 * 1024 Byte / 512 Byte/sector
                 # = 2097152 sector
-                self.dmsetup.create(
+                self.dmsetup.suspend(
+                    self._dm_target_name(volume)
+                )
+                self.dmsetup.load(
                     self._dm_target_name(volume),
                     ' '.join(
                         [
@@ -344,6 +452,9 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         ]
                     )
                 )
+                self.dmsetup.resume(
+                    self._dm_target_name(volume)
+                )
         except Exception:
             with excutils.save_and_reraise_exception():
                 LOG.exception(
@@ -353,7 +464,22 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 volume['status'] = 'error'
                 volume['migration_status'] = 'error'
                 volume.save()
-                self.dmsetup.remove(
+                self.dmsetup.suspend(
+                    self._dm_target_name(volume)
+                )
+                self.dmsetup.load(
+                    self._dm_target_name(volume),
+                    ' '.join(
+                        [
+                            '0',
+                            str(volume['size'] * 2097152),
+                            'linear',
+                            self.local_path(volume),
+                            '0'
+                        ]
+                    )
+                )
+                self.dmsetup.resume(
                     self._dm_target_name(volume)
                 )
                 connector.disconnect_volume(
@@ -377,7 +503,38 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 'enable_hydration'
             )
 
+    def delete_volume(self, volume):
+        LOG.debug('Deleting volume: %(volume)s', {'volume': volume})
+        self.dmsetup.remove(
+            self._dm_target_name(volume)
+        )
+        super(DMCloneVolumeDriver, self).delete_volume(volume)
+
     # #######  Interface methods for DataPath (Connector) ########
+
+    def ensure_export(self, context, volume):
+        self.vg.activate_lv(volume['name'])
+
+        volume_path = "/dev/mapper/%s" % (self._dm_target_name(volume))
+
+        model_update = \
+            self.target_driver.ensure_export(context, volume, volume_path)
+        return model_update
+
+    def create_export(self, context, volume, connector):
+        self.vg.activate_lv(volume['name'])
+
+        volume_path = "/dev/mapper/%s" % (self._dm_target_name(volume))
+
+        export_info = self.target_driver.create_export(
+            context,
+            volume,
+            volume_path)
+        return {'provider_location': export_info['location'],
+                'provider_auth': export_info['auth'], }
+
+    def remove_export(self, context, volume):
+        self.target_driver.remove_export(context, volume)
 
     def initialize_connection(self, volume, connector, **kwargs):
         LOG.debug(
@@ -413,26 +570,8 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             )
         LOG.debug('Initializing connection for connector: %(connector)s',
                   {'connector': connector})
-        if connector['host'] == volume_utils.extract_host(volume['host'],
+        if connector['host'] != volume_utils.extract_host(volume['host'],
                                                           'host'):
-            # NOTE(jhorstmann): If volume and connector are local add a linear
-            # target for consistency
-
-            self.dmsetup.create(
-                self._dm_target_name(volume),
-                ' '.join(
-                    [
-                        '0',
-                        str(volume['size'] * 2097152),
-                        'linear',
-                        self.local_path(volume),
-                        '0'
-                    ]
-
-                )
-            )
-
-        else:
             # NOTE(jhorstmann): Call target driver in case it does some local
             # initialization
             self.target_driver.initialize_connection(volume, connector)
@@ -572,9 +711,25 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             ):
                 # NOTE(jhorstmann): This is a termination of a connection to a
                 # source volume
-                self.remove_export(ctxt, volume)
-                self.dmsetup.remove(self._dm_target_name(volume))
-                self.create_export(ctxt, volume, connector)
+                self.dmsetup.suspend(
+                    self._dm_target_name(volume)
+                )
+                self.dmsetup.load(
+                    self._dm_target_name(volume),
+                    ' '.join(
+                        [
+                            '0',
+                            str(volume['size'] * 2097152),
+                            'linear',
+                            self.local_path(volume),
+                            '0'
+                        ]
+
+                    )
+                )
+                self.dmsetup.resume(
+                    self._dm_target_name(volume)
+                )
         elif len(attachments) == 1:
             if (
                 volume['migration_status']
@@ -586,8 +741,24 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     # and everything may be cleaned up
                     rpcapi = volume_rpcapi.VolumeAPI()
                     self._switch_volumes(volume, src_volume)
-                    self.dmsetup.remove(
-                        self._dm_target_name(src_volume)
+                    self.dmsetup.suspend(
+                        self._dm_target_name(volume)
+                    )
+                    self.dmsetup.load(
+                        self._dm_target_name(volume),
+                        ' '.join(
+                            [
+                                '0',
+                                str(volume['size'] * 2097152),
+                                'linear',
+                                self.local_path(volume),
+                                '0'
+                            ]
+
+                        )
+                    )
+                    self.dmsetup.resume(
+                        self._dm_target_name(volume)
                     )
                     self.vg_metadata.delete(
                         self._metadata_dev_name(src_volume)
@@ -614,8 +785,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     )
                     volume['status'] = 'maintenance'
                     volume.save()
-            else:
-                self.dmsetup.remove(self._dm_target_name(volume))
         elif len(attachments) == 2:
             # NOTE(jhorstmann): This point is reached during live-migration.
             # Volumes should always be migrating
@@ -652,7 +821,23 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     # NOTE(jhorstmann): Disconnection on this host means
                     # live-migration has failed and we need to clean up
                     self._switch_volumes(volume, src_volume)
-                    self.dmsetup.remove(
+                    self.dmsetup.suspend(
+                        self._dm_target_name(src_volume)
+                    )
+                    self.dmsetup.load(
+                        self._dm_target_name(src_volume),
+                        ' '.join(
+                            [
+                                '0',
+                                str(volume['size'] * 2097152),
+                                'linear',
+                                self.local_path(src_volume),
+                                '0'
+                            ]
+
+                        )
+                    )
+                    self.dmsetup.resume(
                         self._dm_target_name(src_volume)
                     )
                     self.vg_metadata.delete(
