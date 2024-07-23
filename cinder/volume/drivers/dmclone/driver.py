@@ -360,7 +360,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     if volume['status'] == 'maintenance':
                         volume['status'] = 'available'
 
-                    volume.update({'migration_status': 'success'})
+                    volume.update({'migration_status': None})
                     volume.save()
 
     def _update_volume_stats(self):
@@ -462,7 +462,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     {'volume': volume}
                 )
                 volume['status'] = 'error'
-                volume['migration_status'] = 'error'
+                volume['migration_status'] = None
                 volume.save()
                 self.dmsetup.suspend(
                     self._dm_target_name(volume)
@@ -541,24 +541,23 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             'Initializing connection for volume %(volume)s',
             {'volume': volume}
         )
-        if not volume['migration_status'] in [None, 'success', 'error']:
+        if volume['migration_status']:
             raise exception.InvalidVolume(
                 reason='Volume is still migrating'
             )
-        ctxt = context.get_admin_context()
-        attachments = (
-            objects.volume_attachment.VolumeAttachmentList
-            .get_all_by_volume_id(ctxt, volume['id'])
-        )
+        attachments = [
+            attachment for attachment in volume.volume_attachment
+            if attachment.attach_status in ['attached', 'detaching']
+        ]
         LOG.debug(
             'Got attachments for volume %(id)s: %(attachments)s',
             {'id': volume['id'], 'attachments': attachments}
         )
 
-        if len(attachments) == 1:
+        if len(attachments) == 0:
             migration_status = 'migrating'
 
-        elif len(attachments) == 2:
+        elif len(attachments) == 1:
             migration_status = 'starting'
         else:
             raise exception.InvalidInput(
@@ -579,6 +578,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             # NOTE(jhorstmann): The assumption is that the remote backend
             # is the same as the local one
             dst_host = connector['host'] + '@' + volume['host'].split('@')[1]
+            ctxt = context.get_admin_context()
             dst_service = objects.Service.get_by_args(
                 ctxt,
                 volume_utils.extract_host(dst_host, 'backend'),
@@ -696,10 +696,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             {'volume': volume}
         )
         ctxt = context.get_admin_context()
-        attachments = (
-            objects.volume_attachment.VolumeAttachmentList
-            .get_all_by_volume_id(ctxt, volume['id'])
-        )
+        attachments = [
+            attachment for attachment in volume.volume_attachment
+            if attachment.attach_status in ['attached', 'attaching', 'detaching']
+        ]
         LOG.debug(
             'Got attachments for volume %(id)s: %(attachments)s',
             {'id': volume['id'], 'attachments': attachments}
@@ -865,8 +865,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         'enable_hydration'
                     )
             else:
-                volume['status'] = 'maintenance'
-                volume.save()
                 raise exception.InvalidInput(
                     reason =
                     'Unexpected volume migration_status '
