@@ -40,6 +40,10 @@ driver_opts = [
                default=None,
                sample_default='Defaults to "volume_group"',
                help='Name for the VG that will contain exported volumes'),
+    cfg.StrOpt('metadata_volume_size',
+               default='16s',
+               help='Size clone metadata volumes will be created with.'
+                    'Values get parsed by lvcreate`s \'--size\' option'),
     cfg.IntOpt('clone_region_size',
                default=8,
                help='The size of a region in sectors'
@@ -477,9 +481,11 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     {'volume': src_volume, 'handle': src_volume_handle}
                 )
 
+                # NOTE(jhorstmann): Formula for size of metadata device
+                # derived by fitting linear function to observed values
                 self.vg_metadata.create_volume(
                     self._metadata_dev_name(volume),
-                    '1g'
+                    self.configuration.metadata_volume_size
                 )
 
                 self._load_or_create_clone_target(
