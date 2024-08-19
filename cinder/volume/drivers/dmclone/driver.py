@@ -202,6 +202,8 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         )
         for volume in volumes:
             # NOTE(jhorstmann): Create dm targets if they do not exist
+            if volume.status == 'creating':
+                continue
             try:
                 self.dmsetup.status(
                     self._dm_target_name(volume)
