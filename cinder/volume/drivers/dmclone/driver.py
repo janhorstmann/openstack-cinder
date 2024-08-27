@@ -466,6 +466,14 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 # initialize_connection
                 attachment.volume_id = volume.id
                 attachment.save()
+                # Cinder also adds an `access_mode=ro` property to admin
+                # metadata for historical reasons. This needs to be moved as
+                # well
+                access_mode = src_volume.admin_metadata.pop("access_mode", None)
+                if access_mode:
+                    src_volume.admin_metadata_update(src_volume.admin_metadata, True)
+                    volume.admin_metadata_update({"access_mode": access_mode})
+
             except Exception:
                 with excutils.save_and_reraise_exception():
                     LOG.exception(
@@ -649,8 +657,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             # volume references the newly created volume on the destination
             # and vice versa
             self._switch_volumes(volume, new_volume)
-            volume.refresh()
-            new_volume.refresh()
             # TODO: For some reason the attachment volume_id is not updated.
             # Fix this and delete the attachment move at the end of create_volume
             # # NOTE(jhorstmann): Implicitly moving the local attachment to the
