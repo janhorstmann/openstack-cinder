@@ -471,6 +471,56 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         self.dmsetup.remove(self._dm_target_name(volume))
         super(DMCloneVolumeDriver, self).delete_volume(volume)
 
+    def before_volume_copy(self, context, src_vol, dest_vol, remote=None):
+        """Driver-specific actions before copyvolume data.
+
+        This method will be called before _copy_volume_data during volume
+        migration
+        """
+        dest_vol.admin_metadata.update({"dmclone:request_remote_connection": True})
+        dest_vol.save()
+
+    def after_volume_copy(self, context, src_vol, dest_vol, remote=None):
+        """Driver-specific actions after copyvolume data.
+
+        This method will be called after _copy_volume_data during volume
+        migration
+        """
+        dest_vol.admin_metadata.pop("dmclone:request_remote_connection", None)
+        dest_vol.save()
+
+    def update_migrated_volume(self, ctxt, volume, new_volume, original_volume_status):
+        """Return model update for migrated volume.
+
+        Each driver implementing this method needs to be responsible for the
+        values of _name_id and provider_location. If None is returned or either
+        key is not set, it means the volume table does not need to change the
+        value(s) for the key(s).
+        The return format is {"_name_id": value, "provider_location": value}.
+
+        :param volume: The original volume that was migrated to this backend
+        :param new_volume: The migration volume object that was created on
+                           this backend as part of the migration process
+        :param original_volume_status: The status of the original volume
+        :returns: model_update to update DB with any needed changes
+        """
+        model_update = super(DMCloneVolumeDriver, self).update_migrated_volume(
+            ctxt, volume, new_volume, original_volume_status
+        )
+        # NOTE(jhorstmann): Rename the handle if the lv has been renamed
+        current_name = self._dm_target_name(new_volume)
+        new_name = (CONF.volume_name_template + "-handle") % (
+            model_update["_name_id"] or volume.id
+        )
+        LOG.debug(
+            "Updating volume after migration: %(old)s -> %(new)s",
+            {"old": current_name, "new": new_name},
+        )
+        if current_name != new_name:
+            self.dmsetup.rename(current_name, new_name)
+        # NOTE(jhorstmann): After the update self._dm_target_name() should return the correct name again
+        return model_update
+
     # #######  Interface methods for DataPath (Connector) ########
 
     def ensure_export(self, context, volume):
