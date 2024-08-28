@@ -35,40 +35,52 @@ from cinder.volume import volume_utils
 LOG = logging.getLogger(__name__)
 
 driver_opts = [
-    cfg.StrOpt('metadata_volume_group',
-               default=None,
-               sample_default='Defaults to "volume_group"',
-               help='Name for the VG that will contain exported volumes'),
-    cfg.StrOpt('metadata_volume_size',
-               default='16s',
-               help='Size clone metadata volumes will be created with.'
-                    'Values get parsed by lvcreate`s \'--size\' option'),
-    cfg.IntOpt('clone_region_size',
-               default=8,
-               help='The size of a region in sectors'
-                    'https://docs.kernel.org/admin-guide/device-mapper/'
-                    'dm-clone.html#constructor'),
-    cfg.BoolOpt('clone_no_discard_passdown',
-                default=False,
-                help='Disable passing down discards to the destination device'
-                     'https://docs.kernel.org/admin-guide/device-mapper/'
-                     'dm-clone.html#constructor'),
-    cfg.IntOpt('clone_hydration_threshold',
-               default=None,
-               sample_default='Use device mapper clone target defaults',
-               help='Maximum number of regions being copied from the source '
-                    'to the destination device at any one time, during '
-                    'background hydration.'
-                    'https://docs.kernel.org/admin-guide/device-mapper/'
-                    'dm-clone.html#constructor'),
-    cfg.IntOpt('clone_hydration_batch_size',
-               default=None,
-               sample_default='Use device mapper clone target defaults',
-               help='During background hydration, try to batch together '
-                    'contiguous regions, so we copy data from the source to '
-                    'the destination device in batches of this many regions.'
-                    'https://docs.kernel.org/admin-guide/device-mapper/'
-                    'dm-clone.html#constructor'),
+    cfg.StrOpt(
+        "metadata_volume_group",
+        default=None,
+        sample_default='Defaults to "volume_group"',
+        help="Name for the VG that will contain exported volumes",
+    ),
+    cfg.StrOpt(
+        "metadata_volume_size",
+        default="16s",
+        help="Size clone metadata volumes will be created with."
+        "Values get parsed by lvcreate`s '--size' option",
+    ),
+    cfg.IntOpt(
+        "clone_region_size",
+        default=8,
+        help="The size of a region in sectors"
+        "https://docs.kernel.org/admin-guide/device-mapper/"
+        "dm-clone.html#constructor",
+    ),
+    cfg.BoolOpt(
+        "clone_no_discard_passdown",
+        default=False,
+        help="Disable passing down discards to the destination device"
+        "https://docs.kernel.org/admin-guide/device-mapper/"
+        "dm-clone.html#constructor",
+    ),
+    cfg.IntOpt(
+        "clone_hydration_threshold",
+        default=None,
+        sample_default="Use device mapper clone target defaults",
+        help="Maximum number of regions being copied from the source "
+        "to the destination device at any one time, during "
+        "background hydration."
+        "https://docs.kernel.org/admin-guide/device-mapper/"
+        "dm-clone.html#constructor",
+    ),
+    cfg.IntOpt(
+        "clone_hydration_batch_size",
+        default=None,
+        sample_default="Use device mapper clone target defaults",
+        help="During background hydration, try to batch together "
+        "contiguous regions, so we copy data from the source to "
+        "the destination device in batches of this many regions."
+        "https://docs.kernel.org/admin-guide/device-mapper/"
+        "dm-clone.html#constructor",
+    ),
 ]
 
 CONF = cfg.CONF
@@ -77,7 +89,7 @@ CONF.register_opts(driver_opts, group=configuration.SHARED_CONF_GROUP)
 
 @interface.volumedriver
 class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
-    VERSION = '0.0.1'
+    VERSION = "0.0.1"
 
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = ""
@@ -85,104 +97,76 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
     def __init__(self, *args, **kwargs):
         super(DMCloneVolumeDriver, self).__init__(*args, **kwargs)
         self.configuration.append_config_values(driver_opts)
-        self.backend_name = self.configuration.safe_get(
-            'volume_backend_name'
-        ) or 'DMClone'
+        self.backend_name = (
+            self.configuration.safe_get("volume_backend_name") or "DMClone"
+        )
         root_helper = utils.get_root_helper()
         self.dmsetup = DMSetup(root_helper)
-        self.metadata_volume_group = (
-            self.configuration.safe_get('metadata_volume_group')
-            or
-            self.configuration.safe_get('volume_group')
-        )
-        self.vg_metadata = brick_lvm.LVM(
-            self.metadata_volume_group,
-            root_helper
-        )
+        self.metadata_volume_group = self.configuration.safe_get(
+            "metadata_volume_group"
+        ) or self.configuration.safe_get("volume_group")
+        self.vg_metadata = brick_lvm.LVM(self.metadata_volume_group, root_helper)
 
-    def _load_or_create_clone_target(self,
-                                     volume,
-                                     src_dev,
-                                     enable_hydration=False,
-                                     create=False):
+    def _load_or_create_clone_target(
+        self, volume, src_dev, enable_hydration=False, create=False
+    ):
         # NOTE(jhorstmann): Sizes in device mapper are in sectors
         # A sector is 512 Byte and volume['size'] is in GiByte
         # GiByte / 512 Byte/sector
         # = 1024 * 1024 * 1024 Byte / 512 Byte/sector
         # = 2097152 sector
         options = [
-            '0',
-            str(volume['size'] * 2097152),
-            'clone',
-            '/dev/{0}/{1}'.format(
-                self.metadata_volume_group,
-                self._metadata_dev_name(volume)
+            "0",
+            str(volume["size"] * 2097152),
+            "clone",
+            "/dev/{0}/{1}".format(
+                self.metadata_volume_group, self._metadata_dev_name(volume)
             ),
             self.local_path(volume),
             src_dev,
-            str(self.configuration.clone_region_size)
+            str(self.configuration.clone_region_size),
         ]
         feature_args = []
         if not enable_hydration:
-            feature_args.append('no_hydration')
+            feature_args.append("no_hydration")
         if self.configuration.clone_no_discard_passdown:
-            feature_args.append('no_discard_passdown')
+            feature_args.append("no_discard_passdown")
         options.append(str(len(feature_args)))
         options += feature_args
         core_args = []
         if self.configuration.clone_hydration_threshold:
-            core_args.append('hydration_threshold')
+            core_args.append("hydration_threshold")
             core_args.append(self.configuration.clone_hydration_threshold)
         if self.configuration.clone_hydration_batch_size:
-            core_args.append('hydration_batch_size')
+            core_args.append("hydration_batch_size")
             core_args.append(self.configuration.clone_hydration_batch_size)
         if len(core_args) > 0:
             options.append(str(len(core_args)))
             options += core_args
         if create:
-            self.dmsetup.create(
-                self._dm_target_name(volume),
-                ' '.join(options)
-            )
+            self.dmsetup.create(self._dm_target_name(volume), " ".join(options))
         else:
-            self.dmsetup.suspend(
-                self._dm_target_name(volume)
-            )
-            self.dmsetup.load(
-                self._dm_target_name(volume),
-                ' '.join(options)
-            )
-            self.dmsetup.resume(
-                self._dm_target_name(volume)
-            )
+            self.dmsetup.suspend(self._dm_target_name(volume))
+            self.dmsetup.load(self._dm_target_name(volume), " ".join(options))
+            self.dmsetup.resume(self._dm_target_name(volume))
 
     def _load_or_create_linear_target(self, volume, create=False):
         options = [
-            '0',
-            str(volume['size'] * 2097152),
-            'linear',
+            "0",
+            str(volume["size"] * 2097152),
+            "linear",
             self.local_path(volume),
-            '0'
+            "0",
         ]
         if create:
-            self.dmsetup.create(
-                self._dm_target_name(volume),
-                ' '.join(options)
-            )
+            self.dmsetup.create(self._dm_target_name(volume), " ".join(options))
         else:
-            self.dmsetup.suspend(
-                self._dm_target_name(volume)
-            )
-            self.dmsetup.load(
-                self._dm_target_name(volume),
-                ' '.join(options)
-            )
-            self.dmsetup.resume(
-                self._dm_target_name(volume)
-            )
+            self.dmsetup.suspend(self._dm_target_name(volume))
+            self.dmsetup.load(self._dm_target_name(volume), " ".join(options))
+            self.dmsetup.resume(self._dm_target_name(volume))
 
     def check_for_setup_error(self):
-        LOG.debug('Running check for setup error')
+        LOG.debug("Running check for setup error")
         super(DMCloneVolumeDriver, self).check_for_setup_error()
 
         # NOTE(jhorstmann): Find volumes of this host
@@ -190,94 +174,73 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         # backend configuration here. The volume_backend_name currently needs
         # to be the same as the OptGroup
         # Fix this!
-        host = self.hostname + '@' + self.backend_name
+        host = self.hostname + "@" + self.backend_name
         ctxt = context.get_admin_context()
-        volumes = objects.volume.VolumeList.get_all_by_host(
-            ctxt,
-            host
-        )
+        volumes = objects.volume.VolumeList.get_all_by_host(ctxt, host)
 
         LOG.debug(
-            'Received volume list for host %(host)s: %(volumes)s',
-            {'host': host, 'volumes': volumes}
+            "Received volume list for host %(host)s: %(volumes)s",
+            {"host": host, "volumes": volumes},
         )
         for volume in volumes:
             # NOTE(jhorstmann): Create dm targets if they do not exist
-            if volume.status == 'creating':
+            if volume.status == "creating":
                 continue
             try:
-                self.dmsetup.status(
-                    self._dm_target_name(volume)
-                )
+                self.dmsetup.status(self._dm_target_name(volume))
             except Exception:
                 # TODO: Check for exact error
-                if (
-                    volume['migration_status']
-                    and volume['migration_status'].startswith('target:')
+                if volume["migration_status"] and volume["migration_status"].startswith(
+                    "target:"
                 ):
-                    if self.vg_metadata.get_volume(
-                        self._metadata_dev_name(volume)
-                    ):
+                    if self.vg_metadata.get_volume(self._metadata_dev_name(volume)):
                         src_volume = self._find_src_volume(volume)
-                        connector, connector_data = self._get_connector(
-                            src_volume
-                        )
-                        src_volume_handle = connector.connect_volume(
-                            connector_data
-                        )
+                        connector, connector_data = self._get_connector(src_volume)
+                        src_volume_handle = connector.connect_volume(connector_data)
                         LOG.debug(
-                            'Obtained handle for source volume %(volume)s: '
-                            '%(handle)s',
-                            {'volume': src_volume,
-                             'handle': src_volume_handle}
+                            "Obtained handle for source volume %(volume)s: "
+                            "%(handle)s",
+                            {"volume": src_volume, "handle": src_volume_handle},
                         )
 
-                        if src_volume['migration_status'] == 'starting':
+                        if src_volume["migration_status"] == "starting":
                             self._load_or_create_clone_target(
-                                volume, src_volume_handle['path'],
-                                create=True
+                                volume, src_volume_handle["path"], create=True
                             )
-                        elif src_volume['migration_status'] == 'migrating':
+                        elif src_volume["migration_status"] == "migrating":
                             self._load_or_create_clone_target(
                                 volume,
-                                src_volume_handle['path'],
+                                src_volume_handle["path"],
                                 enable_hydration=True,
-                                create=True
+                                create=True,
                             )
                     else:
-                        volume['status'] = 'maintenance'
+                        volume["status"] = "maintenance"
                         volume.save()
                         raise exception.InvalidVolume(
-                            reason='Volume is still migrating, but has no '
-                            'metadata device'
+                            reason="Volume is still migrating, but has no "
+                            "metadata device"
                         )
                 else:
                     self._load_or_create_linear_target(volume, create=True)
 
             # NOTE(jhorstmann): Make sure source volumes are exported
-            if (
-                volume['migration_status']
-                and (
-                    volume['migration_status'] == 'starting'
-                    or
-                    volume['migration_status'] == 'migrating'
-                )
+            if volume["migration_status"] and (
+                volume["migration_status"] == "starting"
+                or volume["migration_status"] == "migrating"
             ):
                 self.ensure_export(ctxt, volume)
 
         self.migration_monitor = loopingcall.FixedIntervalLoopingCall(
             self._migration_monitor
         )
-        self.migration_monitor.start(
-            interval=10,
-            stop_on_exception=False
-        )
+        self.migration_monitor.start(interval=10, stop_on_exception=False)
 
     def _metadata_dev_name(self, volume):
-        return volume.name + '-metadata'
+        return volume.name + "-metadata"
 
     def _dm_target_name(self, volume):
-        return volume.name + '-handle'
+        return volume.name + "-handle"
 
     def _switch_volumes(self, volume, other_volume):
         # TODO: Switch service uuid?
@@ -285,13 +248,13 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         volume.name_id = other_volume.name_id
         other_volume.name_id = tmp
         for field in (
-            'host',
-            'cluster_name',
-            'availability_zone',
-            'provider_id',
-            'provider_location',
-            'provider_auth',
-            'provider_geometry'
+            "host",
+            "cluster_name",
+            "availability_zone",
+            "provider_id",
+            "provider_location",
+            "provider_auth",
+            "provider_geometry",
         ):
             tmp = volume[field]
             volume[field] = other_volume[field]
@@ -301,63 +264,51 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
 
     def _find_src_volume(self, volume):
         # NOTE(jhorstmann): Find the source volume.
-        src_volume_id = volume['migration_status'].split(':')[1]
+        src_volume_id = volume["migration_status"].split(":")[1]
         ctxt = context.get_admin_context()
         try:
-            src_volume = objects.Volume.get_by_id(ctxt,
-                                                  src_volume_id)
-            LOG.debug('Found source volume: %(volume)s',
-                      {'volume': src_volume})
+            src_volume = objects.Volume.get_by_id(ctxt, src_volume_id)
+            LOG.debug("Found source volume: %(volume)s", {"volume": src_volume})
         except exception.VolumeNotFound:
             src_volume = None
             LOG.error(
-                'Source volume not found for volume ID: %(id)s',
-                {'id': src_volume_id}
+                "Source volume not found for volume ID: %(id)s", {"id": src_volume_id}
             )
 
         return src_volume
 
         rpcapi = volume_rpcapi.VolumeAPI()
         LOG.debug(
-            'Calling RPC API to remove export for volume: '
-            '%(volume)s',
-            {'volume': volume}
+            "Calling RPC API to remove export for volume: " "%(volume)s",
+            {"volume": volume},
         )
         ctxt = context.get_admin_context()
         rpcapi.remove_export(ctxt, volume, sync=True)
 
     def _migration_monitor(self):
-        LOG.debug(
-            'Starting migration monitor'
-        )
-        host = self.hostname + '@' + self.backend_name
+        LOG.debug("Starting migration monitor")
+        host = self.hostname + "@" + self.backend_name
         ctxt = context.get_admin_context()
         migrating_volumes = [
-            v for v in objects.volume.VolumeList.get_all_by_host(
-                ctxt,
-                host
-            )
-            if (v['migration_status']
-                and v['migration_status'].startswith('target:'))
+            v
+            for v in objects.volume.VolumeList.get_all_by_host(ctxt, host)
+            if (v["migration_status"] and v["migration_status"].startswith("target:"))
         ]
         LOG.debug(
-            'Found migrating volumes: %(volumes)s',
-            {'volumes': migrating_volumes}
+            "Found migrating volumes: %(volumes)s", {"volumes": migrating_volumes}
         )
         for volume in migrating_volumes:
-            dm_status = self.dmsetup.status(
-                self._dm_target_name(volume)
-            )
-            if dm_status[2] != 'clone':
+            dm_status = self.dmsetup.status(self._dm_target_name(volume))
+            if dm_status[2] != "clone":
                 LOG.error(
-                    'Volume %(id)s has migration_status %(migration_status)s, '
-                    'but device mapper target is %(dm_status)s where clone '
-                    'was expected',
+                    "Volume %(id)s has migration_status %(migration_status)s, "
+                    "but device mapper target is %(dm_status)s where clone "
+                    "was expected",
                     {
-                        'id': volume.name_id,
-                        'migration_status': volume['migration_status'],
-                        'dm_status': dm_status[2]
-                    }
+                        "id": volume.name_id,
+                        "migration_status": volume["migration_status"],
+                        "dm_status": dm_status[2],
+                    },
                 )
                 continue
             else:
@@ -366,71 +317,63 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 # E.g.:
                 # 0 2097152 clone 8 30/262144 8 262144/262144 0 0 4 \
                 # hydration_threshold 1 hydration_batch_size 1 rw
-                hydrated = dm_status[6].split('/')
+                hydrated = dm_status[6].split("/")
                 # NOTE(jhorstmann): If hydration completed we finish the
                 # migration process
-                if hydrated[0] == hydrated[1] and dm_status[7] == '0':
+                if hydrated[0] == hydrated[1] and dm_status[7] == "0":
                     LOG.debug(
-                        'Completing migration for volume %(volume)s',
-                        {'voume': volume}
+                        "Completing migration for volume %(volume)s", {"voume": volume}
                     )
                     src_volume = self._find_src_volume(volume)
-                    src_volume.update({'migration_status': 'completing'})
+                    src_volume.update({"migration_status": "completing"})
                     src_volume.save()
                     self._load_or_create_linear_target(volume)
                     LOG.debug(
-                        'Removing metadata device: %(device)s',
-                        {'device': self._metadata_dev_name(volume)}
+                        "Removing metadata device: %(device)s",
+                        {"device": self._metadata_dev_name(volume)},
                     )
-                    self.vg_metadata.delete(
-                        self._metadata_dev_name(volume)
-                    )
+                    self.vg_metadata.delete(self._metadata_dev_name(volume))
                     LOG.debug(
-                        'Looking for attachment in %(attachments)s',
-                        {'attachments': src_volume.volume_attachment}
+                        "Looking for attachment in %(attachments)s",
+                        {"attachments": src_volume.volume_attachment},
                     )
 
                     # NOTE(jhorstmann): There should only ever be one
                     # active attachment on source volumes.
                     attachments = [
-                        attachment for attachment in
-                        src_volume.volume_attachment
-                        if attachment.attach_status == 'attached'
+                        attachment
+                        for attachment in src_volume.volume_attachment
+                        if attachment.attach_status == "attached"
                     ]
                     if len(attachments) != 1:
-                        src_volume.update({'migration_status': 'error'})
+                        src_volume.update({"migration_status": "error"})
                         src_volume.save()
                         raise exception.InvalidVolume(
-                            reason='Unexpected number of attachments for '
-                                   'volume {src} while trying to complete '
-                                   'migration of volume {dst}'.format(
-                                       src=src_volume.id,
-                                       dst=volume.id
-                                   )
+                            reason="Unexpected number of attachments for "
+                            "volume {src} while trying to complete "
+                            "migration of volume {dst}".format(
+                                src=src_volume.id, dst=volume.id
+                            )
                         )
                     attachment = attachments[0]
                     connector = volume_utils.brick_get_connector(
-                        attachment.connection_info['driver_volume_type'],
-                        use_multipath=self.configuration
-                                          .use_multipath_for_image_xfer,
-                        device_scan_attempts=self.configuration
-                                                 .num_volume_device_scan_tries,
-                        conn=attachment.connection_info
+                        attachment.connection_info["driver_volume_type"],
+                        use_multipath=self.configuration.use_multipath_for_image_xfer,
+                        device_scan_attempts=self.configuration.num_volume_device_scan_tries,
+                        conn=attachment.connection_info,
                     )
                     LOG.debug(
-                        'Disconnecting source volume: '
-                        '%(connection)s',
-                        {'connection': attachment.connection_info}
+                        "Disconnecting source volume: " "%(connection)s",
+                        {"connection": attachment.connection_info},
                     )
                     connector.disconnect_volume(
                         connection_properties=attachment.connection_info,
                         device_info=attachment.connection_info,
-                        force=True
+                        force=True,
                     )
                     LOG.debug(
-                        'Calling RPC API to delete volume: '
-                        '%(volume)s',
-                        {'volume': src_volume}
+                        "Calling RPC API to delete volume: " "%(volume)s",
+                        {"volume": src_volume},
                     )
                     rpcapi = volume_rpcapi.VolumeAPI()
                     rpcapi.attachment_delete(
@@ -440,10 +383,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     )
                     rpcapi.delete_volume(ctxt, src_volume)
 
-                    if volume['status'] == 'maintenance':
-                        volume['status'] = 'available'
+                    if volume["status"] == "maintenance":
+                        volume["status"] = "available"
 
-                    volume.update({'migration_status': None})
+                    volume.update({"migration_status": None})
                     volume.save()
 
     def _update_volume_stats(self):
@@ -452,89 +395,71 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         data = {}
 
         data["volume_backend_name"] = self.backend_name
-        data["vendor_name"] = 'Open Source'
+        data["vendor_name"] = "Open Source"
         data["driver_version"] = self.VERSION
         data["storage_protocol"] = self.protocol
         self._stats.update(data)
 
     def create_volume(self, volume):
-        LOG.debug('Creating volume: %(volume)s', {'volume': volume})
+        LOG.debug("Creating volume: %(volume)s", {"volume": volume})
         super(DMCloneVolumeDriver, self).create_volume(volume)
         self._load_or_create_linear_target(volume, create=True)
-        if volume['migration_status'] in ['starting', 'migrating']:
+        if volume["migration_status"] in ["starting", "migrating"]:
             try:
                 # NOTE(jhorstmann): Use the volume's user-facing ID here
-                filters = {'migration_status': 'target:' + volume['id']}
+                filters = {"migration_status": "target:" + volume["id"]}
                 LOG.debug(
-                    'Looking for source volume with filters :%(filters)s`',
-                    {'filters': filters}
+                    "Looking for source volume with filters :%(filters)s`",
+                    {"filters": filters},
                 )
                 ctxt = context.get_admin_context()
                 src_volume = objects.volume.VolumeList.get_all(
-                    ctxt,
-                    limit=1,
-                    filters=filters
+                    ctxt, limit=1, filters=filters
                 )[0]
                 if not src_volume:
                     raise exception.ValidationError(
-                        'Source volume not found for volume: {0}'.format(
-                            volume
-                        )
+                        "Source volume not found for volume: {0}".format(volume)
                     )
-                LOG.debug('Found source volume: %(volume)s',
-                          {'volume': src_volume})
+                LOG.debug("Found source volume: %(volume)s", {"volume": src_volume})
 
                 # NOTE(jhorstmann): Push the magic button for a remote
                 # connection
                 src_volume.admin_metadata.update(
-                    {'dmclone:request_remote_connection': True}
+                    {"dmclone:request_remote_connection": True}
                 )
                 src_volume.save()
 
-                attachment = src_volume.begin_attach('ro')
+                attachment = src_volume.begin_attach("ro")
 
-                connector_properties = \
-                    volume_utils.brick_get_connector_properties(
-                        self.configuration.use_multipath_for_image_xfer,
-                        enforce_multipath=False
-                    )
+                connector_properties = volume_utils.brick_get_connector_properties(
+                    self.configuration.use_multipath_for_image_xfer,
+                    enforce_multipath=False,
+                )
                 rpcapi = volume_rpcapi.VolumeAPI()
                 attachment.connection_info = rpcapi.attachment_update(
-                    ctxt,
-                    src_volume,
-                    connector_properties,
-                    attachment.id
+                    ctxt, src_volume, connector_properties, attachment.id
                 )
                 LOG.debug(
-                    'Connection details: %(con)s',
-                    {'con': attachment.connection_info}
+                    "Connection details: %(con)s", {"con": attachment.connection_info}
                 )
                 connector = volume_utils.brick_get_connector(
-                    attachment.connection_info['driver_volume_type'],
-                    use_multipath=self.
-                    configuration.use_multipath_for_image_xfer,
-                    device_scan_attempts=self.
-                    configuration.num_volume_device_scan_tries,
-                    conn=attachment.connection_info
+                    attachment.connection_info["driver_volume_type"],
+                    use_multipath=self.configuration.use_multipath_for_image_xfer,
+                    device_scan_attempts=self.configuration.num_volume_device_scan_tries,
+                    conn=attachment.connection_info,
                 )
-                src_volume_handle = connector.connect_volume(
-                    attachment.connection_info
-                )
+                src_volume_handle = connector.connect_volume(attachment.connection_info)
                 attachment.finish_attach(
-                    None,
-                    self.hostname,
-                    src_volume_handle['path'],
-                    'ro'
+                    None, self.hostname, src_volume_handle["path"], "ro"
                 )
                 attachment.save()
 
                 self.vg_metadata.create_volume(
                     self._metadata_dev_name(volume),
-                    self.configuration.metadata_volume_size
+                    self.configuration.metadata_volume_size,
                 )
 
-                self._load_or_create_clone_target(
-                    volume, src_volume_handle['path'])
+                self._load_or_create_clone_target(volume, src_volume_handle["path"])
                 # TODO: Move the move of the attachment to after the volume switch in
                 # initialize_connection
                 attachment.volume_id = volume.id
@@ -543,209 +468,179 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 with excutils.save_and_reraise_exception():
                     LOG.exception(
                         "Failed to create migration volume: %(volume)s",
-                        {'volume': volume}
+                        {"volume": volume},
                     )
-                    volume['status'] = 'error'
-                    volume['migration_status'] = None
+                    volume["status"] = "error"
+                    volume["migration_status"] = None
                     volume.save()
                     self._load_or_create_linear_target(volume)
                     connector.disconnect_volume(
-                        attachment.connection_info['data'],
-                        src_volume_handle['path'],
+                        attachment.connection_info["data"],
+                        src_volume_handle["path"],
                         force=True,
-                        ignore_errors=True
+                        ignore_errors=True,
                     )
                     rpcapi.attachment_delete(ctxt, attachment.id, volume)
-                    self.vg_metadata.delete(
-                        self._metadata_dev_name(volume)
-                    )
+                    self.vg_metadata.delete(self._metadata_dev_name(volume))
                     super(DMCloneVolumeDriver, self).delete_volume(volume)
 
-        if volume['migration_status'] == 'migrating':
-            LOG.debug(
-                'Starting migration of volume %(volume)s',
-                {'volume': volume}
-            )
-            self.dmsetup.message(
-                self._dm_target_name(volume),
-                '0',
-                'enable_hydration'
-            )
+        if volume["migration_status"] == "migrating":
+            LOG.debug("Starting migration of volume %(volume)s", {"volume": volume})
+            self.dmsetup.message(self._dm_target_name(volume), "0", "enable_hydration")
 
     def delete_volume(self, volume):
-        LOG.debug('Deleting volume: %(volume)s', {'volume': volume})
-        self.dmsetup.remove(
-            self._dm_target_name(volume)
-        )
+        LOG.debug("Deleting volume: %(volume)s", {"volume": volume})
+        self.dmsetup.remove(self._dm_target_name(volume))
         super(DMCloneVolumeDriver, self).delete_volume(volume)
 
     # #######  Interface methods for DataPath (Connector) ########
 
     def ensure_export(self, context, volume):
-        self.vg.activate_lv(volume['name'])
+        self.vg.activate_lv(volume["name"])
 
         volume_path = "/dev/mapper/%s" % (self._dm_target_name(volume))
 
-        model_update = \
-            self.target_driver.ensure_export(context, volume, volume_path)
+        model_update = self.target_driver.ensure_export(context, volume, volume_path)
         return model_update
 
     def create_export(self, context, volume, connector):
-        self.vg.activate_lv(volume['name'])
+        self.vg.activate_lv(volume["name"])
 
         volume_path = "/dev/mapper/%s" % (self._dm_target_name(volume))
 
-        export_info = self.target_driver.create_export(
-            context,
-            volume,
-            volume_path)
-        return {'provider_location': export_info['location'],
-                'provider_auth': export_info['auth'], }
+        export_info = self.target_driver.create_export(context, volume, volume_path)
+        return {
+            "provider_location": export_info["location"],
+            "provider_auth": export_info["auth"],
+        }
 
     def remove_export(self, context, volume):
         self.target_driver.remove_export(context, volume)
 
     def initialize_connection(self, volume, connector, **kwargs):
-        LOG.debug(
-            'Initializing connection for volume %(volume)s',
-            {'volume': volume}
-        )
-        if volume.admin_metadata.pop(
-            'dmclone:request_remote_connection',
-            False
-        ):
+        LOG.debug("Initializing connection for volume %(volume)s", {"volume": volume})
+        if volume.admin_metadata.pop("dmclone:request_remote_connection", False):
             volume.admin_metadata_update(volume.admin_metadata, True)
             # NOTE(jhorstmann): Remote connection is requested:
             # Call target driver to initialize the connection and return it
-            return self.target_driver.initialize_connection(
-                volume,
-                connector
-            )
+            return self.target_driver.initialize_connection(volume, connector)
 
-        if volume['migration_status']:
-            raise exception.InvalidVolume(
-                reason='Volume is still migrating'
-            )
+        if volume["migration_status"]:
+            raise exception.InvalidVolume(reason="Volume is still migrating")
         attachments = [
-            attachment for attachment in volume.volume_attachment
-            if attachment.attach_status in ['attached', 'detaching']
+            attachment
+            for attachment in volume.volume_attachment
+            if attachment.attach_status in ["attached", "detaching"]
         ]
         LOG.debug(
-            'Got attachments for volume %(id)s: %(attachments)s',
-            {'id': volume['id'], 'attachments': attachments}
+            "Got attachments for volume %(id)s: %(attachments)s",
+            {"id": volume["id"], "attachments": attachments},
         )
 
         if len(attachments) == 0:
-            migration_status = 'migrating'
+            migration_status = "migrating"
 
         elif len(attachments) == 1:
-            migration_status = 'starting'
+            migration_status = "starting"
         else:
             raise exception.InvalidInput(
-                reason =
-                'Unexpected number of attachments ({0}) for volume {1}'.format(
-                    len(attachments),
-                    volume['id']
+                reason="Unexpected number of attachments ({0}) for volume {1}".format(
+                    len(attachments), volume["id"]
                 )
             )
-        LOG.debug('Initializing connection for connector: %(connector)s',
-                  {'connector': connector})
-        if connector['host'] != volume_utils.extract_host(volume['host'],
-                                                          'host'):
+        LOG.debug(
+            "Initializing connection for connector: %(connector)s",
+            {"connector": connector},
+        )
+        if connector["host"] != volume_utils.extract_host(volume["host"], "host"):
             # NOTE(jhorstmann): The assumption is that the remote backend
             # is the same as the local one
-            dst_host = connector['host'] + '@' + volume['host'].split('@')[1]
+            dst_host = connector["host"] + "@" + volume["host"].split("@")[1]
             ctxt = context.get_admin_context()
             dst_service = objects.Service.get_by_args(
                 ctxt,
-                volume_utils.extract_host(dst_host, 'backend'),
-                constants.VOLUME_BINARY
+                volume_utils.extract_host(dst_host, "backend"),
+                constants.VOLUME_BINARY,
             )
 
             new_volume = objects.Volume(
                 context=ctxt,
-                host=dst_service['host'],
+                host=dst_service["host"],
                 availability_zone=dst_service.availability_zone,
-                status='creating',
+                status="creating",
                 attach_status=objects.fields.VolumeAttachStatus.DETACHED,
-                cluster_name=dst_service['cluster_name'],
+                cluster_name=dst_service["cluster_name"],
                 migration_status=migration_status,
                 use_quota=False,  # Don't use quota for temporary volume
-                size = volume.size,
-                user_id = volume.user_id,
-                project_id = volume.project_id,
-                display_description = 'migration src for ' + volume['id']
+                size=volume.size,
+                user_id=volume.user_id,
+                project_id=volume.project_id,
+                display_description="migration src for " + volume["id"],
             )
 
             # TODO: Get lock for new_volume
             new_volume.create()
             LOG.debug(
-                'Created destination volume object: %(volume)s ',
-                {'volume': new_volume}
+                "Created destination volume object: %(volume)s ", {"volume": new_volume}
             )
 
             # NOTE(jhorstmann): Order is important, this will be used by the
             # driver's create_volume() method.
             # Use the volume's user-facing ID here
-            volume.update({'migration_status': 'target:' + new_volume['id']})
+            volume.update({"migration_status": "target:" + new_volume["id"]})
             volume.save()
-            LOG.debug('Updated volume: %(volume)s ', {'volume': volume})
+            LOG.debug("Updated volume: %(volume)s ", {"volume": volume})
 
             LOG.debug(
-                'Calling RPC API to create volume: %(volume)s',
-                {'volume': new_volume}
+                "Calling RPC API to create volume: %(volume)s", {"volume": new_volume}
             )
             rpcapi = volume_rpcapi.VolumeAPI()
-            rpcapi.create_volume(
-                ctxt, new_volume, None, None, allow_reschedule=False
-            )
+            rpcapi.create_volume(ctxt, new_volume, None, None, allow_reschedule=False)
             LOG.debug(
-                'Waiting for creation of volume: %(volume)s',
-                {'volume': new_volume}
+                "Waiting for creation of volume: %(volume)s", {"volume": new_volume}
             )
 
             # Wait for new_volume to become ready
             deadline = time.time() + 60
             new_volume.refresh()
             tries = 0
-            while new_volume.status != 'available':
+            while new_volume.status != "available":
                 tries += 1
-                if time.time() > deadline or new_volume.status == 'error':
+                if time.time() > deadline or new_volume.status == "error":
                     try:
                         rpcapi.delete_volume(ctxt, new_volume)
                     except exception.VolumeNotFound:
-                        LOG.info('Could not find the temporary volume '
-                                 '%(vol)s in the database. There is no need '
-                                 'to clean up this volume.',
-                                 {'vol': new_volume.id})
+                        LOG.info(
+                            "Could not find the temporary volume "
+                            "%(vol)s in the database. There is no need "
+                            "to clean up this volume.",
+                            {"vol": new_volume.id},
+                        )
 
                     new_volume.destroy()
-                    volume.update({'migration_status': 'error'})
+                    volume.update({"migration_status": "error"})
                     volume.save()
-                    LOG.debug(
-                        'Updated volume: %(volume)s ',
-                        {'volume': volume}
-                    )
-                    if new_volume.status == 'error':
+                    LOG.debug("Updated volume: %(volume)s ", {"volume": volume})
+                    if new_volume.status == "error":
                         raise exception.VolumeMigrationFailed(
-                            reason='Error creating remote volume'
+                            reason="Error creating remote volume"
                         )
                     else:
                         raise exception.VolumeMigrationFailed(
-                            reason='Timeout waiting for remote volume creation'
+                            reason="Timeout waiting for remote volume creation"
                         )
                 else:
-                    time.sleep(tries ** 2)
+                    time.sleep(tries**2)
                 new_volume.refresh()
 
             # NOTE(jhorstmann): It seems that new volumes always end up
             # 'available'.The status is set to 'maintenance' here, so it
             # cannot be messed with
-            new_volume.update({'status': 'maintenance'})
+            new_volume.update({"status": "maintenance"})
             new_volume.save()
             LOG.debug(
-                'Updated status for volume %(id)s to %(status)s',
-                {'id': volume['id'], 'status': volume['status']}
+                "Updated status for volume %(id)s to %(status)s",
+                {"id": volume["id"], "status": volume["status"]},
             )
 
             # NOTE(jhorstmann): Switch volume identities, so that the current
@@ -783,10 +678,8 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             # TODO: Release lock for new_volume
 
         return {
-            'driver_volume_type': 'local',
-            'data': {
-                "device_path": '/dev/mapper/' + self._dm_target_name(volume)
-            }
+            "driver_volume_type": "local",
+            "data": {"device_path": "/dev/mapper/" + self._dm_target_name(volume)},
         }
 
     def terminate_connection(self, volume, connector, **kwargs):
@@ -796,91 +689,74 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         :param connector: A dictionary describing the connection with details
                           about the initiator. Can be None.
         """
-        LOG.debug(
-            'Terminating connection for volume %(volume)s',
-            {'volume': volume}
-        )
+        LOG.debug("Terminating connection for volume %(volume)s", {"volume": volume})
         ctxt = context.get_admin_context()
         attachments = [
-            attachment for attachment in volume.volume_attachment
-            if attachment.attach_status in ['attached',
-                                            'attaching',
-                                            'detaching']
+            attachment
+            for attachment in volume.volume_attachment
+            if attachment.attach_status in ["attached", "attaching", "detaching"]
         ]
         LOG.debug(
-            'Got attachments for volume %(id)s: %(attachments)s',
-            {'id': volume['id'], 'attachments': attachments}
+            "Got attachments for volume %(id)s: %(attachments)s",
+            {"id": volume["id"], "attachments": attachments},
         )
         if (
             len(attachments) == 1
-            and attachments[0].connection_info['driver_volume_type'] != 'local'
+            and attachments[0].connection_info["driver_volume_type"] != "local"
         ):
             # NOTE(jhorstmann): Termination of non-local attachments.
             # These are the terminations which actually need
             # to be passed to the target driver
-            self.target_driver.terminate_connection(
-                volume,
-                connector
-            )
+            self.target_driver.terminate_connection(volume, connector)
 
         else:
-            if (
-                volume['migration_status']
-                and volume['migration_status'].startswith('target:')
+            if volume["migration_status"] and volume["migration_status"].startswith(
+                "target:"
             ):
                 src_volume = self._find_src_volume(volume)
-                if src_volume['migration_status'] == 'starting':
+                if src_volume["migration_status"] == "starting":
                     # The connector is required to decide what to do
                     if not connector:
                         raise exception.InvalidConnectorException(
-                            missing='Connector object is None'
+                            missing="Connector object is None"
                         )
-                    if connector['host'] == self.hostname:
+                    if connector["host"] == self.hostname:
                         # NOTE(jhorstmann): Data migration has not started yet
                         # and everything may be cleaned up
                         self._load_or_create_linear_target(volume)
-                        self.vg_metadata.delete(
-                            self._metadata_dev_name(volume)
-                        )
+                        self.vg_metadata.delete(self._metadata_dev_name(volume))
                         attachment = [
                             attachment
                             for attachment in src_volume.volume_attachment
                             if (
-                                attachment.
-                                connection_info['driver_volume_type'] !=
-                                'local'
-                                and
-                                attachment.attached_host == self.hostname
+                                attachment.connection_info["driver_volume_type"]
+                                != "local"
+                                and attachment.attached_host == self.hostname
                             )
-
                         ][0]
                         connector = volume_utils.brick_get_connector(
-                            attachment.connection_info['driver_volume_type'],
-                            use_multipath=
-                            self.configuration.use_multipath_for_image_xfer,
-                            device_scan_attempts=
-                            self.configuration.num_volume_device_scan_tries,
-                            conn=attachment.connection_info
+                            attachment.connection_info["driver_volume_type"],
+                            use_multipath=self.configuration.use_multipath_for_image_xfer,
+                            device_scan_attempts=self.configuration.num_volume_device_scan_tries,
+                            conn=attachment.connection_info,
                         )
                         LOG.debug(
-                            'Disconnecting source volume: '
-                            '%(connection)s',
-                            {'connection': attachment.connection_info}
+                            "Disconnecting source volume: " "%(connection)s",
+                            {"connection": attachment.connection_info},
                         )
                         connector.disconnect_volume(
                             connection_properties=attachment.connection_info,
                             device_info=attachment.connection_info,
-                            force=True
+                            force=True,
                         )
                         self._switch_volumes(volume, src_volume)
                         LOG.debug(
-                            'Calling RPC API to delete volume: '
-                            '%(volume)s',
-                            {'volume': src_volume}
+                            "Calling RPC API to delete volume: " "%(volume)s",
+                            {"volume": src_volume},
                         )
                         rpcapi = volume_rpcapi.VolumeAPI()
                         rpcapi.delete_volume(ctxt, src_volume)
-                        volume['migration_status'] = None
+                        volume["migration_status"] = None
                         volume.save()
                     else:
                         # NOTE(jhorstmann): Disconnection on the remote host
@@ -888,42 +764,35 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         # actually disconnect the remote volume and start
                         # hydration
                         attachment = [
-                            attachment for attachment in attachments
+                            attachment
+                            for attachment in attachments
                             if (
-                                attachment.
-                                connection_info['driver_volume_type'] ==
-                                'local'
-                                and
-                                attachment.attached_host != self.hostname
+                                attachment.connection_info["driver_volume_type"]
+                                == "local"
+                                and attachment.attached_host != self.hostname
                             )
-
                         ][0]
                         connector = volume_utils.brick_get_connector(
-                            attachment.connection_info['driver_volume_type'],
-                            use_multipath=
-                            self.configuration.use_multipath_for_image_xfer,
-                            device_scan_attempts=
-                            self.configuration.num_volume_device_scan_tries,
-                            conn=attachment.connection_info
+                            attachment.connection_info["driver_volume_type"],
+                            use_multipath=self.configuration.use_multipath_for_image_xfer,
+                            device_scan_attempts=self.configuration.num_volume_device_scan_tries,
+                            conn=attachment.connection_info,
                         )
                         LOG.debug(
-                            'Disconnecting source volume: '
-                            '%(connection)s',
-                            {'connection': attachment.connection_info}
+                            "Disconnecting source volume: " "%(connection)s",
+                            {"connection": attachment.connection_info},
                         )
                         connector.disconnect_volume(
                             connection_properties=attachment.connection_info,
                             device_info=attachment.connection_info,
-                            force=True
+                            force=True,
                         )
-                        src_volume['migration_status'] = 'migrating'
+                        src_volume["migration_status"] = "migrating"
                         src_volume.save()
                         self.dmsetup.message(
-                            self._dm_target_name(volume),
-                            '0',
-                            'enable_hydration'
+                            self._dm_target_name(volume), "0", "enable_hydration"
                         )
-                elif src_volume['migration_status'] == 'migrating':
+                elif src_volume["migration_status"] == "migrating":
                     # NOTE(jhorstmann): Data migration has already started
                     # and writes could have landed on the new volume.
                     # We do not want to chain migrations, so the volume is
@@ -935,9 +804,9 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     # allow other connections on the same hypervisor
                     # One could still set maintenance after first failure
                     LOG.info(
-                        'Volume %(id)s still migrating during termination '
-                        'of connection, setting status to maintenance',
-                        {'id': volume['id']}
+                        "Volume %(id)s still migrating during termination "
+                        "of connection, setting status to maintenance",
+                        {"id": volume["id"]},
                     )
-                    volume['status'] = 'maintenance'
+                    volume["status"] = "maintenance"
                     volume.save()
