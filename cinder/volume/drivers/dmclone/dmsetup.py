@@ -26,64 +26,49 @@ class DMSetup(executor.Executor):
         super(DMSetup, self).__init__(root_helper, execute=execute)
 
     def _run(self, arg_list: list[str]):
-        cmd = ['dmsetup'] + arg_list
+        cmd = ["dmsetup"] + arg_list
         try:
-            return self._execute(
-                *cmd,
-                root_helper=self._root_helper,
-                run_as_root=True)
+            return self._execute(*cmd, root_helper=self._root_helper, run_as_root=True)
         except putils.ProcessExecutionError as err:
-            LOG.exception('Error executing command')
-            LOG.error('Cmd     :%s', err.cmd)
-            LOG.error('StdOut  :%s', err.stdout)
-            LOG.error('StdErr  :%s', err.stderr)
+            LOG.exception("Error executing command")
+            LOG.error("Cmd     :%s", err.cmd)
+            LOG.error("StdOut  :%s", err.stdout)
+            LOG.error("StdErr  :%s", err.stderr)
             raise
 
     def create(self, target: str, table: str):
-        cmd = ['create',
-               target,
-               '--table',
-               table]
+        cmd = ["create", target, "--table", table]
         self._run(cmd)
 
     def remove(self, target: str):
-        cmd = ['remove',
-               target]
+        cmd = ["remove", target]
         self._run(cmd)
 
     def suspend(self, target: str):
-        cmd = ['suspend',
-               target]
+        cmd = ["suspend", target]
         self._run(cmd)
 
     def resume(self, target: str):
-        cmd = ['resume',
-               target]
+        cmd = ["resume", target]
         self._run(cmd)
 
     def load(self, target: str, table: str):
-        cmd = ['load',
-               target,
-               '--table',
-               table]
+        cmd = ["load", target, "--table", table]
         self._run(cmd)
 
     def message(self, target: str, sector: str, message: str):
-        cmd = ['message',
-               target,
-               sector,
-               message]
+        cmd = ["message", target, sector, message]
         self._run(cmd)
 
     def table(self, target: str | None = None) -> list[str]:
-        cmd = ['table']
+        cmd = ["table"]
         if target:
             cmd.append(target)
         (out, err) = self._run(cmd)
-        return out.split('\n')
+        return out.split("\n")
 
     def status(self, target: str) -> list[str]:
-        cmd = ['status']
+        cmd = ["status"]
         cmd.append(target)
         (out, err) = self._run(cmd)
-        return out.split(' ')
+        return out.split(" ")
