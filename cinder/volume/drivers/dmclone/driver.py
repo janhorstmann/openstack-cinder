@@ -279,14 +279,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
 
         return src_volume
 
-        rpcapi = volume_rpcapi.VolumeAPI()
-        LOG.debug(
-            "Calling RPC API to remove export for volume: " "%(volume)s",
-            {"volume": volume},
-        )
-        ctxt = context.get_admin_context()
-        rpcapi.remove_export(ctxt, volume, sync=True)
-
     def _migration_monitor(self):
         LOG.debug("Starting migration monitor")
         host = self.hostname + "@" + self.backend_name
