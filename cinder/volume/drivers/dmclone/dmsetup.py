@@ -74,3 +74,7 @@ class DMSetup(executor.Executor):
         cmd.append(target)
         (out, err) = self._run(cmd)
         return out.split(" ")
+
+    def rename(self, target: str, name: str):
+        cmd = ["rename", target, name]
+        self._run(cmd)
