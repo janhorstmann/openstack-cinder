@@ -25,6 +25,7 @@ from cinder.brick.local_dev import lvm as brick_lvm
 from cinder.common import constants
 from cinder import context
 from cinder import exception
+from cinder.image import image_utils
 from cinder import interface
 from cinder import objects
 from cinder import utils
@@ -470,6 +471,30 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         LOG.debug("Deleting volume: %(volume)s", {"volume": volume})
         self.dmsetup.remove(self._dm_target_name(volume))
         super(DMCloneVolumeDriver, self).delete_volume(volume)
+
+    def copy_image_to_volume(
+        self, context, volume, image_service, image_id, disable_sparse=False
+    ):
+        """Fetch the image from image_service and write it to the volume."""
+        image_utils.fetch_to_raw(
+            context,
+            image_service,
+            image_id,
+            "/dev/mapper/%s" % (self._dm_target_name(volume)),
+            self.configuration.volume_dd_blocksize,
+            size=volume["size"],
+            disable_sparse=disable_sparse,
+        )
+
+    def copy_volume_to_image(self, context, volume, image_service, image_meta):
+        """Copy the volume to the specified image."""
+        volume_utils.upload_volume(
+            context,
+            image_service,
+            image_meta,
+            "/dev/mapper/%s" % (self._dm_target_name(volume)),
+            volume,
+        )
 
     def before_volume_copy(self, context, src_vol, dest_vol, remote=None):
         """Driver-specific actions before copyvolume data.
