@@ -376,6 +376,12 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         data["vendor_name"] = "Open Source"
         data["driver_version"] = self.VERSION
         data["storage_protocol"] = self.protocol
+
+        # NOTE(jhorstmann): Extend attached volume is currently missing on nova
+        # side for libvirt and local volume type
+        # https://github.com/janhorstmann/openstack-nova/commit/bf0239bb4899a973b357bcc91c193b27e2508758
+        data['online_extend_support'] = False
+
         self._stats.update(data)
 
     def create_volume(self, volume):
@@ -495,6 +501,28 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             "/dev/mapper/%s" % (self._dm_target_name(volume)),
             volume,
         )
+
+    def extend_volume(self, volume, new_size):
+        """Extend an existing volume's size."""
+        dm_table = self.dmsetup.table(self._dm_target_name(volume))
+
+        if dm_table[2] != "linear":
+            # NOTE(jhorstmann): Changing the size of a clone target is not supported
+            # https://github.com/torvalds/linux/blob/da3ea35007d0af457a0afc87e84fddaebc4e0b63/drivers/md/dm-clone-metadata.c#L336
+            raise exception.InvalidVolume(reason="Volume is still migrating")
+
+        # NOTE(jhorstmann): We cannot simply call super().extend_volume() since
+        # it also calls target_driver.extend_target(). We do not need to do
+        # that since this driver's volumes are local.
+        # This is taken from the lvm driver:
+        ######################################################################
+        self.vg.extend_volume(volume["name"], self._sizestr(new_size))
+        ######################################################################
+
+        dm_table[1] = str(new_size * 2097152)
+        self.dmsetup.suspend(self._dm_target_name(volume))
+        self.dmsetup.load(self._dm_target_name(volume), " ".join(dm_table))
+        self.dmsetup.resume(self._dm_target_name(volume))
 
     def before_volume_copy(self, context, src_vol, dest_vol, remote=None):
         """Driver-specific actions before copyvolume data.
