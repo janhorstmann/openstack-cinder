@@ -66,13 +66,13 @@ class DMSetup(executor.Executor):
         cmd = ["table"]
         cmd.append(target)
         (out, err) = self._run(cmd)
-        return out.split(" ")
+        return out.strip().split(" ")
 
     def status(self, target: str) -> list[str]:
         cmd = ["status"]
         cmd.append(target)
         (out, err) = self._run(cmd)
-        return out.split(" ")
+        return out.strip().split(" ")
 
     def rename(self, target: str, name: str):
         cmd = ["rename", target, name]
