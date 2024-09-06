@@ -62,12 +62,11 @@ class DMSetup(executor.Executor):
         cmd = ["message", target, sector, message]
         self._run(cmd)
 
-    def table(self, target: str | None = None) -> list[str]:
+    def table(self, target: str) -> list[str]:
         cmd = ["table"]
-        if target:
-            cmd.append(target)
+        cmd.append(target)
         (out, err) = self._run(cmd)
-        return out.split("\n")
+        return out.split(" ")
 
     def status(self, target: str) -> list[str]:
         cmd = ["status"]
