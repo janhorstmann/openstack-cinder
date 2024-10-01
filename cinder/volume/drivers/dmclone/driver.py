@@ -474,10 +474,36 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             LOG.debug("Starting migration of volume %(volume)s", {"volume": volume})
             self.dmsetup.message(self._dm_target_name(volume), "0", "enable_hydration")
 
+    def create_volume_from_snapshot(self, volume, snapshot):
+        """Creates a volume from a snapshot.
+
+        If volume_type extra specs includes 'replication: <is> True'
+        the driver needs to create a volume replica (secondary),
+        and setup replication between the newly created volume and
+        the secondary volume.
+        """
+
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        raise NotImplementedError()
+
     def delete_volume(self, volume):
         LOG.debug("Deleting volume: %(volume)s", {"volume": volume})
         self.dmsetup.remove(self._dm_target_name(volume))
         super(DMCloneVolumeDriver, self).delete_volume(volume)
+
+    def create_snapshot(self, snapshot):
+        """Creates a snapshot."""
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        raise NotImplementedError()
+
+    def delete_snapshot(self, snapshot):
+        """Deletes a snapshot.
+
+        If the driver uses custom file locks they should be cleaned on success
+        using cinder.utils.synchronized_remove
+        """
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        raise NotImplementedError()
 
     def copy_image_to_volume(
         self, context, volume, image_service, image_id, disable_sparse=False
@@ -574,6 +600,63 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             self.dmsetup.rename(current_name, new_name)
         # NOTE(jhorstmann): After the update self._dm_target_name() should return the correct name again
         return model_update
+
+    def create_cloned_volume(self, volume, src_vref):
+        """Creates a clone of the specified volume.
+
+        If volume_type extra specs includes 'replication: <is> True' the
+        driver needs to create a volume replica (secondary)
+        and setup replication between the newly created volume
+        and the secondary volume.
+        """
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        raise NotImplementedError()
+
+    def manage_existing(self, volume, existing_ref):
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        msg = _("Manage existing volume not implemented.")
+        raise NotImplementedError(msg)
+
+    def revert_to_snapshot(self, context, volume, snapshot):
+        """Revert volume to snapshot.
+
+        Note: the revert process should not change the volume's
+        current size, that means if the driver shrank
+        the volume during the process, it should extend the
+        volume internally.
+        """
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        msg = _("Revert volume to snapshot not implemented.")
+        raise NotImplementedError(msg)
+
+    def manage_existing_get_size(self, volume, existing_ref):
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        msg = _("Manage existing volume not implemented.")
+        raise NotImplementedError(msg)
+
+    def get_manageable_volumes(
+        self, cinder_volumes, marker, limit, offset, sort_keys, sort_dirs
+    ):
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        msg = _("Get manageable volumes not implemented.")
+        raise NotImplementedError(msg)
+
+    def manage_existing_snapshot(self, snapshot, existing_ref):
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        msg = _("Manage existing snapshot not implemented.")
+        raise NotImplementedError(msg)
+
+    def manage_existing_snapshot_get_size(self, snapshot, existing_ref):
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        msg = _("Manage existing snapshot not implemented.")
+        raise NotImplementedError(msg)
+
+    def get_manageable_snapshots(
+        self, cinder_snapshots, marker, limit, offset, sort_keys, sort_dirs
+    ):
+        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
+        msg = _("Get manageable snapshots not implemented.")
+        raise NotImplementedError(msg)
 
     # #######  Interface methods for DataPath (Connector) ########
 
