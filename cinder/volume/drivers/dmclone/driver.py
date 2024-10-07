@@ -934,34 +934,9 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     else:
                         # NOTE(jhorstmann): Disconnection on the remote host
                         # means live-migration has succeded and we need to
-                        # actually disconnect its local volume and start
-                        # hydration
-                        attachment = [
-                            attachment
-                            for attachment in attachments
-                            if (
-                                attachment.connection_info["driver_volume_type"]
-                                == "local"
-                                and attachment.attached_host != self.hostname
-                            )
-                        ][0]
-                        connector = volume_utils.brick_get_connector(
-                            attachment.connection_info["driver_volume_type"],
-                            use_multipath=self.configuration.use_multipath_for_image_xfer,
-                            device_scan_attempts=self.configuration.num_volume_device_scan_tries,
-                            conn=attachment.connection_info,
-                        )
-                        LOG.debug(
-                            "Disconnecting source volume: " "%(connection)s",
-                            {"connection": attachment.connection_info},
-                        )
-                        connector.disconnect_volume(
-                            connection_properties=attachment.connection_info,
-                            device_info=attachment.connection_info,
-                            force=True,
-                        )
+                        # start hydration
                         volume.admin_metadata.update({"dmclone:hydration": True})
+                        volume.save()
                         self.dmsetup.message(
                             self._dm_target_name(volume), "0", "enable_hydration"
                         )
-                        volume.save()
