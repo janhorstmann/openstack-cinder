@@ -285,29 +285,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         LOG.debug("Starting transfer monitor")
         host = self.hostname + "@" + self.backend_name
         ctxt = context.get_admin_context()
-        transfering_volumes = [
-            v
-            for v in objects.volume.VolumeList.get_all_by_host(ctxt, host)
-            if v.admin_metadata.get("dmclone:source", None)
-        ]
-        LOG.debug(
-            "Found transfering volumes: %(volumes)s", {"volumes": transfering_volumes}
-        )
-        for volume in transfering_volumes:
+        volumes = objects.volume.VolumeList.get_all_by_host(ctxt, host)
+        for volume in volumes:
             dm_status = self.dmsetup.status(self._dm_target_name(volume))
-            if dm_status[2] != "clone":
-                LOG.error(
-                    "Volume %(id)s has 'dmclone:source' %(source)s, "
-                    "but device mapper target is %(dm_status)s where clone "
-                    "was expected",
-                    {
-                        "id": volume.name_id,
-                        "source": volume.admin_metadata.get("dmclone:source", None),
-                        "dm_status": dm_status[2],
-                    },
-                )
-                continue
-            else:
+            if dm_status[2] == "clone":
                 # NOTE(jhorstmann): Status output for clone target described in
                 # https://docs.kernel.org/admin-guide/device-mapper/dm-clone.html#status
                 # E.g.:
@@ -366,15 +347,19 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         device_info=attachment.connection_info,
                         force=True,
                     )
-                    LOG.debug(
-                        "Calling RPC API to delete volume: " "%(volume)s",
-                        {"volume": src_volume},
-                    )
                     rpcapi = volume_rpcapi.VolumeAPI()
+                    LOG.debug(
+                        "Calling RPC API to delete attachment %(attachment)s of volume %(volume)s",
+                        {"attachment": attachment, "volume": src_volume},
+                    )
                     rpcapi.attachment_delete(
                         ctxt,
                         attachment.id,
                         src_volume,
+                    )
+                    LOG.debug(
+                        "Calling RPC API to delete volume: %(volume)s",
+                        {"volume": src_volume},
                     )
                     rpcapi.delete_volume(ctxt, src_volume)
 
@@ -708,7 +693,8 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             {"connector": connector},
         )
         if connector["host"] != volume_utils.extract_host(volume["host"], "host"):
-            if volume.admin_metadata.get("dmclone:source", None):
+            dm_status = self.dmsetup.status(self._dm_target_name(volume))
+            if dm_status[2] == "clone":
                 # NOTE(jhorstmann): Data transfer is still ongoing and
                 # we do not want to chain transfers
                 LOG.info(
