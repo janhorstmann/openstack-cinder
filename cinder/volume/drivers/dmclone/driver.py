@@ -192,58 +192,58 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         )
         for volume in volumes:
             # NOTE(jhorstmann): Create dm targets if they do not exist
-            if volume.status == "creating":
-                continue
             try:
                 self.dmsetup.status(self._dm_target_name(volume))
             except Exception:
                 # TODO: Check for exact error
                 source = volume.admin_metadata.get("dmclone:source", None)
-                if source:
-                    if not self.vg_metadata.get_volume(self._metadata_dev_name(volume)):
-                        volume["status"] = "maintenance"
-                        volume.save()
-                        raise exception.InvalidVolume(
-                            reason="Volume is still transfering, but has no "
-                            "metadata device"
+                if source and volume.status != "creating":
+                    try:
+                        self.vg_metadata.get_volume(self._metadata_dev_name(volume))
+                        src_volume = objects.volume.Volume.get_by_id(ctxt, source)
+                        attachment = [
+                            attachment
+                            for attachment in src_volume.volume_attachment
+                            if (
+                                attachment.connection_info["driver_volume_type"]
+                                != "local"
+                                and attachment.attached_host == self.hostname
+                            )
+                        ][0]
+                        connector = volume_utils.brick_get_connector(
+                            attachment.connection_info["driver_volume_type"],
+                            use_multipath=self.configuration.use_multipath_for_image_xfer,
+                            device_scan_attempts=self.configuration.num_volume_device_scan_tries,
+                            conn=attachment.connection_info,
                         )
-                    src_volume = objects.volume.Volume.get_by_id(ctxt, source)
-                    attachment = [
-                        attachment
-                        for attachment in src_volume.volume_attachment
-                        if (
-                            attachment.connection_info["driver_volume_type"] != "local"
-                            and attachment.attached_host == self.hostname
+                        connector.connect_volume(
+                            connection_properties=attachment.connection_info,
+                            device_info=attachment.connection_info,
+                            force=True,
                         )
-                    ][0]
-                    connector = volume_utils.brick_get_connector(
-                        attachment.connection_info["driver_volume_type"],
-                        use_multipath=self.configuration.use_multipath_for_image_xfer,
-                        device_scan_attempts=self.configuration.num_volume_device_scan_tries,
-                        conn=attachment.connection_info,
-                    )
-                    connector.connect_volume(
-                        connection_properties=attachment.connection_info,
-                        device_info=attachment.connection_info,
-                        force=True,
-                    )
-                    src_volume_handle = connector.connect_volume(
-                        attachment.connection_info
-                    )
-                    LOG.debug(
-                        "Obtained handle for source volume %(volume)s: " "%(handle)s",
-                        {"volume": src_volume, "handle": src_volume_handle},
-                    )
+                        src_volume_handle = connector.connect_volume(
+                            attachment.connection_info
+                        )
+                        LOG.debug(
+                            "Obtained handle for source volume %(volume)s: "
+                            "%(handle)s",
+                            {"volume": src_volume, "handle": src_volume_handle},
+                        )
 
-                    enable_hydration = volume.admin_metadata.get(
-                        "dmclone:hydration", False
-                    )
-                    self._load_or_create_clone_target(
-                        volume,
-                        src_volume_handle["path"],
-                        enable_hydration=enable_hydration,
-                        create=True,
-                    )
+                        enable_hydration = volume.admin_metadata.get(
+                            "dmclone:hydration", False
+                        )
+                        self._load_or_create_clone_target(
+                            volume,
+                            src_volume_handle["path"],
+                            enable_hydration=enable_hydration,
+                            create=True,
+                        )
+                    except Exception:
+                        LOG.error(
+                            "Could not restore clone target for volume %(volume)s",
+                            {"volume": volume},
+                        )
                 else:
                     self._load_or_create_linear_target(volume, create=True)
 
@@ -377,9 +377,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         src_volume,
                     )
                     rpcapi.delete_volume(ctxt, src_volume)
-
-                    if volume["status"] == "maintenance":
-                        volume["status"] = "available"
 
                     volume.save()
 
@@ -712,19 +709,13 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         )
         if connector["host"] != volume_utils.extract_host(volume["host"], "host"):
             if volume.admin_metadata.get("dmclone:source", None):
-                # NOTE(jhorstmann): Data transfer is still ongoing.
-                # We do not want to chain transfers, so the volume is
-                # set to maintenance so that it cannot be attached
-                # until transfer is done and the state reset
-                # This is so that there is visible feedback for the user
-                # instead of silent failure
+                # NOTE(jhorstmann): Data transfer is still ongoing and
+                # we do not want to chain transfers
                 LOG.info(
                     "Volume %(id)s still transfering during initialization "
-                    "of connection, setting status to maintenance",
+                    "of connection",
                     {"id": volume["id"]},
                 )
-                volume["status"] = "maintenance"
-                volume.save()
                 raise exception.InvalidVolume(reason="Volume is still transfering")
 
             # NOTE(jhorstmann): The assumption is that the remote backend
@@ -811,16 +802,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 else:
                     time.sleep(tries**2)
                 new_volume.refresh()
-
-            # NOTE(jhorstmann): It seems that new volumes always end up
-            # 'available'.The status is set to 'maintenance' here, so it
-            # cannot be messed with
-            new_volume.update({"status": "maintenance"})
-            new_volume.save()
-            LOG.debug(
-                "Updated status for volume %(id)s to %(status)s",
-                {"id": volume["id"], "status": volume["status"]},
-            )
 
             # NOTE(jhorstmann): Switch volume identities, so that the current
             # volume references the newly created volume on the destination
