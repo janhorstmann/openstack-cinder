@@ -51,6 +51,11 @@ driver_opts = [
         "Values get parsed by lvcreate`s '--size' option",
     ),
     cfg.IntOpt(
+        "hydration_monitor_interval",
+        default=10,
+        help="Intervall to the hydration monitor, which finishes volume transfer",
+    ),
+    cfg.IntOpt(
         "clone_region_size",
         default=8,
         help="The size of a region in sectors"
@@ -237,7 +242,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         self.transfer_monitor = loopingcall.FixedIntervalLoopingCall(
             self._transfer_monitor
         )
-        self.transfer_monitor.start(interval=10, stop_on_exception=False)
+        self.transfer_monitor.start(
+            interval=self.configuration.hydration_monitor_interval,
+            stop_on_exception=False,
+        )
 
     def _metadata_dev_name(self, volume):
         return volume.name + "-metadata"
