@@ -200,44 +200,52 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 # TODO: Check for exact error
                 source = volume.admin_metadata.get("dmclone:source", None)
                 if source:
-                    if self.vg_metadata.get_volume(self._metadata_dev_name(volume)):
-                        src_volume = objects.volume.Volume.get_by_id(ctxt, source)
-                        connector, connector_data = self._get_connector(src_volume)
-                        src_volume_handle = connector.connect_volume(connector_data)
-                        LOG.debug(
-                            "Obtained handle for source volume %(volume)s: "
-                            "%(handle)s",
-                            {"volume": src_volume, "handle": src_volume_handle},
-                        )
-
-                        hydration = volume.admin_metadata.get(
-                            "dmclone:hydration", False
-                        )
-                        if not hydration:
-                            self._load_or_create_clone_target(
-                                volume, src_volume_handle["path"], create=True
-                            )
-                        else:
-                            self._load_or_create_clone_target(
-                                volume,
-                                src_volume_handle["path"],
-                                enable_hydration=True,
-                                create=True,
-                            )
-                    else:
+                    if not self.vg_metadata.get_volume(self._metadata_dev_name(volume)):
                         volume["status"] = "maintenance"
                         volume.save()
                         raise exception.InvalidVolume(
                             reason="Volume is still transfering, but has no "
                             "metadata device"
                         )
+                    src_volume = objects.volume.Volume.get_by_id(ctxt, source)
+                    attachment = [
+                        attachment
+                        for attachment in src_volume.volume_attachment
+                        if (
+                            attachment.connection_info["driver_volume_type"] != "local"
+                            and attachment.attached_host == self.hostname
+                        )
+                    ][0]
+                    connector = volume_utils.brick_get_connector(
+                        attachment.connection_info["driver_volume_type"],
+                        use_multipath=self.configuration.use_multipath_for_image_xfer,
+                        device_scan_attempts=self.configuration.num_volume_device_scan_tries,
+                        conn=attachment.connection_info,
+                    )
+                    connector.connect_volume(
+                        connection_properties=attachment.connection_info,
+                        device_info=attachment.connection_info,
+                        force=True,
+                    )
+                    src_volume_handle = connector.connect_volume(
+                        attachment.connection_info
+                    )
+                    LOG.debug(
+                        "Obtained handle for source volume %(volume)s: " "%(handle)s",
+                        {"volume": src_volume, "handle": src_volume_handle},
+                    )
+
+                    enable_hydration = volume.admin_metadata.get(
+                        "dmclone:hydration", False
+                    )
+                    self._load_or_create_clone_target(
+                        volume,
+                        src_volume_handle["path"],
+                        enable_hydration=enable_hydration,
+                        create=True,
+                    )
                 else:
                     self._load_or_create_linear_target(volume, create=True)
-
-            # NOTE(jhorstmann): Make sure source volumes are exported
-            source = volume.admin_metadata.get("dmclone:source", None)
-            if source:
-                self.ensure_export(ctxt, volume)
 
         self.transfer_monitor = loopingcall.FixedIntervalLoopingCall(
             self._transfer_monitor
