@@ -223,7 +223,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         volume["status"] = "maintenance"
                         volume.save()
                         raise exception.InvalidVolume(
-                            reason="Volume is still migrating, but has no "
+                            reason="Volume is still transfering, but has no "
                             "metadata device"
                         )
                 else:
@@ -234,10 +234,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             if source:
                 self.ensure_export(ctxt, volume)
 
-        self.migration_monitor = loopingcall.FixedIntervalLoopingCall(
-            self._migration_monitor
+        self.transfer_monitor = loopingcall.FixedIntervalLoopingCall(
+            self._transfer_monitor
         )
-        self.migration_monitor.start(interval=10, stop_on_exception=False)
+        self.transfer_monitor.start(interval=10, stop_on_exception=False)
 
     def _metadata_dev_name(self, volume):
         return volume.name + "-metadata"
@@ -265,19 +265,19 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         volume.save()
         other_volume.save()
 
-    def _migration_monitor(self):
-        LOG.debug("Starting migration monitor")
+    def _transfer_monitor(self):
+        LOG.debug("Starting transfer monitor")
         host = self.hostname + "@" + self.backend_name
         ctxt = context.get_admin_context()
-        migrating_volumes = [
+        transfering_volumes = [
             v
             for v in objects.volume.VolumeList.get_all_by_host(ctxt, host)
             if v.admin_metadata.get("dmclone:source", None)
         ]
         LOG.debug(
-            "Found migrating volumes: %(volumes)s", {"volumes": migrating_volumes}
+            "Found transfering volumes: %(volumes)s", {"volumes": transfering_volumes}
         )
-        for volume in migrating_volumes:
+        for volume in transfering_volumes:
             dm_status = self.dmsetup.status(self._dm_target_name(volume))
             if dm_status[2] != "clone":
                 LOG.error(
@@ -299,10 +299,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 # hydration_threshold 1 hydration_batch_size 1 rw
                 hydrated = dm_status[6].split("/")
                 # NOTE(jhorstmann): If hydration completed we finish the
-                # migration process
+                # transfer process
                 if hydrated[0] == hydrated[1] and dm_status[7] == "0":
                     LOG.debug(
-                        "Completing migration for volume %(volume)s", {"voume": volume}
+                        "Completing transfer for volume %(volume)s", {"voume": volume}
                     )
                     volume.admin_metadata.pop("dmclone:hydration", None)
                     src_volume = objects.Volume.get_by_id(
@@ -330,7 +330,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         raise exception.InvalidVolume(
                             reason="Unexpected number of attachments for "
                             "volume {src} while trying to complete "
-                            "migration of volume {dst}".format(
+                            "transfer of volume {dst}".format(
                                 src=src_volume.id, dst=volume.id
                             )
                         )
@@ -454,7 +454,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             except Exception:
                 with excutils.save_and_reraise_exception():
                     LOG.exception(
-                        "Failed to create migration volume: %(volume)s",
+                        "Failed to create transfer volume: %(volume)s",
                         {"volume": volume},
                     )
                     volume["status"] = "error"
@@ -471,7 +471,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     super(DMCloneVolumeDriver, self).delete_volume(volume)
 
         if volume.admin_metadata.get("dmclone:hydration", False):
-            LOG.debug("Starting migration of volume %(volume)s", {"volume": volume})
+            LOG.debug("Starting transfer of volume %(volume)s", {"volume": volume})
             self.dmsetup.message(self._dm_target_name(volume), "0", "enable_hydration")
 
     def create_volume_from_snapshot(self, volume, snapshot):
@@ -536,7 +536,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         if dm_table[2] != "linear":
             # NOTE(jhorstmann): Changing the size of a clone target is not supported
             # https://github.com/torvalds/linux/blob/da3ea35007d0af457a0afc87e84fddaebc4e0b63/drivers/md/dm-clone-metadata.c#L336
-            raise exception.InvalidVolume(reason="Volume is still migrating")
+            raise exception.InvalidVolume(reason="Volume is still transfering")
 
         # NOTE(jhorstmann): We cannot simply call super().extend_volume() since
         # it also calls target_driver.extend_target(). We do not need to do
@@ -696,20 +696,20 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         )
         if connector["host"] != volume_utils.extract_host(volume["host"], "host"):
             if volume.admin_metadata.get("dmclone:source", None):
-                # NOTE(jhorstmann): Data migration is still ongoing.
-                # We do not want to chain migrations, so the volume is
+                # NOTE(jhorstmann): Data transfer is still ongoing.
+                # We do not want to chain transfers, so the volume is
                 # set to maintenance so that it cannot be attached
-                # until migration is done and the state reset
+                # until transfer is done and the state reset
                 # This is so that there is visible feedback for the user
                 # instead of silent failure
                 LOG.info(
-                    "Volume %(id)s still migrating during initialization "
+                    "Volume %(id)s still transfering during initialization "
                     "of connection, setting status to maintenance",
                     {"id": volume["id"]},
                 )
                 volume["status"] = "maintenance"
                 volume.save()
-                raise exception.InvalidVolume(reason="Volume is still migrating")
+                raise exception.InvalidVolume(reason="Volume is still transfering")
 
             # NOTE(jhorstmann): The assumption is that the remote backend
             # is the same as the local one
@@ -746,7 +746,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 size=volume.size,
                 user_id=volume.user_id,
                 project_id=volume.project_id,
-                display_description="migration src for " + volume["id"],
+                display_description="transfer src for " + volume["id"],
                 admin_metadata=options,
             )
 
@@ -893,7 +893,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                             missing="Connector object is None"
                         )
                     if connector["host"] == self.hostname:
-                        # NOTE(jhorstmann): Data migration has not started yet
+                        # NOTE(jhorstmann): Data transfer has not started yet
                         # and everything may be cleaned up
                         self._load_or_create_linear_target(volume)
                         self.vg_metadata.delete(self._metadata_dev_name(volume))
