@@ -741,6 +741,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 size=volume.size,
                 user_id=volume.user_id,
                 project_id=volume.project_id,
+                name="transfer src for " + volume["id"],
                 display_description="transfer src for " + volume["id"],
                 admin_metadata=options,
             )
@@ -805,8 +806,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             # NOTE(jhorstmann): 'dmclone:source' points to the wrong volume now, change that
             new_volume.admin_metadata.pop("dmclone:source", None)
             volume.admin_metadata.update({"dmclone:source": new_volume.id})
-            # NOTE(jhorstmann): Add a marker for the destination to the new source volume
-            new_volume.admin_metadata.update({"dmclone:destination": volume.id})
             # NOTE(jhorstmann): Also move 'dmclone:hydration'
             if new_volume.admin_metadata.pop("dmclone:hydration", False):
                 volume.admin_metadata.update({"dmclone:hydration": True})
