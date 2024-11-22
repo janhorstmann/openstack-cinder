@@ -425,6 +425,20 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     conn=attachment.connection_info,
                 )
                 src_volume_handle = connector.connect_volume(attachment.connection_info)
+                # Move the attachment in anticipation of the volume switch in
+                # initialize_connection. This is done here before the switch
+                # because we know the attachment and do not have to find it by
+                # its attributes
+                attachment.volume_id = volume.id
+                attachment.connection_info.update({"volume_id": volume.id})
+                # Cinder also adds an `access_mode=ro` property to admin
+                # metadata for historical reasons. This needs to be moved as
+                # well
+                access_mode = src_volume.admin_metadata.pop("access_mode", None)
+                if access_mode:
+                    volume.admin_metadata.update({"access_mode": access_mode})
+                    src_volume.save()
+                    volume.save()
                 attachment.finish_attach(
                     None, self.hostname, src_volume_handle["path"], "ro"
                 )
@@ -436,18 +450,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 )
 
                 self._load_or_create_clone_target(volume, src_volume_handle["path"])
-                # TODO: Move the move of the attachment to after the volume switch in
-                # initialize_connection
-                attachment.volume_id = volume.id
-                attachment.save()
-                # Cinder also adds an `access_mode=ro` property to admin
-                # metadata for historical reasons. This needs to be moved as
-                # well
-                access_mode = src_volume.admin_metadata.pop("access_mode", None)
-                if access_mode:
-                    volume.admin_metadata.update({"access_mode": access_mode})
-                    src_volume.save()
-                    volume.save()
 
             except Exception:
                 with excutils.save_and_reraise_exception():
@@ -789,9 +791,16 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     time.sleep(tries**2)
                 new_volume.refresh()
 
+            # The created volume comes back as `available`, but it already has
+            # the attachment for the remote connection from destination to the
+            # source. So we update the new volume status to be `in-use` here
+            new_volume["status"] = "in-use"
+
             # NOTE(jhorstmann): Switch volume identities, so that the current
             # volume references the newly created volume on the destination
-            # and vice versa
+            # and vice versa, i.e.:
+            # volume: volume on destination
+            # new_volume: volume on source (this host)
             self._switch_volumes(volume, new_volume)
             # NOTE(jhorstmann): 'dmclone:source' points to the wrong volume now, change that
             new_volume.admin_metadata.pop("dmclone:source", None)
@@ -804,32 +813,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             volume.save()
             new_volume.save()
 
-            # TODO: For some reason the attachment volume_id is not updated.
-            # Fix this and delete the attachment move at the end of create_volume
-            # # NOTE(jhorstmann): Implicitly moving the local attachment to the
-            # # remote volume with the volume switch above was intentional, but
-            # # the remote attachment to the source volume needs to be moved back
-            # attachments = objects.VolumeAttachmentList.get_all_by_volume_id(
-            #     ctxt,
-            #     volume.id
-            # )
-            # for attachment in attachments:
-            #     LOG.debug(
-            #         'Attachment after initialize_connection: %(attachment)s',
-            #         {'attachment': attachment}
-            #     )
-            # attachment = [
-            #     attachment
-            #     for attachment in attachments
-            #     if attachment.connection_info.get(
-            #         'driver_volume_type', None) != 'local'
-            # ][0]
-            # attachment.volume_id = new_volume.id
-            # attachment.save()
-            # LOG.debug(
-            #     'Attachment after initialize_connection: %(attachment)s',
-            #     {'attachment': attachment}
-            # )
             # TODO: Release lock for new_volume
 
         return {
