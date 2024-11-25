@@ -25,6 +25,7 @@ from cinder.brick.local_dev import lvm as brick_lvm
 from cinder.common import constants
 from cinder import context
 from cinder import exception
+from cinder.i18n import _
 from cinder.image import image_utils
 from cinder import interface
 from cinder import objects
