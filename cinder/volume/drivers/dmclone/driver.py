@@ -741,7 +741,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 size=volume.size,
                 user_id=volume.user_id,
                 project_id=volume.project_id,
-                name="transfer src for " + volume["id"],
+                display_name="transfer src for " + volume["id"],
                 display_description="transfer src for " + volume["id"],
                 admin_metadata=options,
             )
