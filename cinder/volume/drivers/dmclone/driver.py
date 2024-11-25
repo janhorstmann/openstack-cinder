@@ -282,6 +282,73 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         volume.save()
         other_volume.save()
 
+    def _find_host_attachment_by_major_minor(self, major_minor, host=None):
+        if not host:
+            host = self.hostname
+        ctxt = context.get_admin_context()
+        for (
+            attachment
+        ) in objects.volume_attachment.VolumeAttachmentList.get_all_by_host(ctxt, host):
+            if not attachment.instance_uuid:
+                if attachment.mountpoint:
+                    try:
+                        if major_minor == utils.get_blkdev_major_minor(
+                            attachment.mountpoint
+                        ):
+                            return attachment
+                    except Exception:
+                        continue
+        return None
+
+    def _cleanup_clone_target(self, ctxt, volume):
+        dm_table = self.dmsetup.table(self._dm_target_name(volume))
+        self._load_or_create_linear_target(volume)
+        LOG.debug(
+            "Removing metadata device: %(device)s",
+            {"device": self._metadata_dev_name(volume)},
+        )
+        self.vg_metadata.delete(self._metadata_dev_name(volume))
+        attachment = self._find_host_attachment_by_major_minor(dm_table[5])
+        if not attachment:
+            raise exception.InvalidVolume(
+                reason="Could not find attachment for "
+                "source volume attached with device major:minor "
+                "{dev} while trying to clean up "
+                "clone target of volume {dst}".format(dev=dm_table[5], dst=volume.id)
+            )
+        LOG.debug(
+            "Found attachment for source volume: %(attachment)s",
+            {"attachment": attachment},
+        )
+
+        connector = volume_utils.brick_get_connector(
+            attachment.connection_info["driver_volume_type"],
+            use_multipath=self.configuration.use_multipath_for_image_xfer,
+            device_scan_attempts=self.configuration.num_volume_device_scan_tries,
+            conn=attachment.connection_info,
+        )
+        LOG.debug(
+            "Disconnecting source volume: " "%(connection)s",
+            {"connection": attachment.connection_info},
+        )
+        connector.disconnect_volume(
+            connection_properties=attachment.connection_info,
+            device_info=attachment.connection_info,
+            force=True,
+        )
+        src_volume = objects.Volume.get_by_id(ctxt, attachment.volume_id)
+        rpcapi = volume_rpcapi.VolumeAPI()
+        LOG.debug(
+            "Calling RPC API to delete attachment %(attachment)s of volume %(volume)s",
+            {"attachment": attachment, "volume": src_volume},
+        )
+        rpcapi.attachment_delete(
+            ctxt,
+            attachment.id,
+            src_volume,
+        )
+        return src_volume
+
     def _transfer_monitor(self):
         LOG.debug("Starting transfer monitor")
         host = self.hostname + "@" + self.backend_name
@@ -300,71 +367,18 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 # transfer process
                 if hydrated[0] == hydrated[1] and dm_status[7] == "0":
                     LOG.debug(
-                        "Completing transfer for volume %(volume)s", {"voume": volume}
+                        "Completing transfer for volume %(volume)s", {"volume": volume}
                     )
                     volume.admin_metadata.pop("dmclone:hydration", None)
-                    src_volume = objects.Volume.get_by_id(
-                        ctxt, volume.admin_metadata.pop("dmclone:source", None)
-                    )
-                    self._load_or_create_linear_target(volume)
-                    LOG.debug(
-                        "Removing metadata device: %(device)s",
-                        {"device": self._metadata_dev_name(volume)},
-                    )
-                    self.vg_metadata.delete(self._metadata_dev_name(volume))
-                    LOG.debug(
-                        "Looking for attachment in %(attachments)s",
-                        {"attachments": src_volume.volume_attachment},
-                    )
-
-                    # NOTE(jhorstmann): There should only ever be one
-                    # active attachment on source volumes.
-                    attachments = [
-                        attachment
-                        for attachment in src_volume.volume_attachment
-                        if attachment.attach_status == "attached"
-                    ]
-                    if len(attachments) != 1:
-                        raise exception.InvalidVolume(
-                            reason="Unexpected number of attachments for "
-                            "volume {src} while trying to complete "
-                            "transfer of volume {dst}".format(
-                                src=src_volume.id, dst=volume.id
-                            )
-                        )
-                    attachment = attachments[0]
-                    connector = volume_utils.brick_get_connector(
-                        attachment.connection_info["driver_volume_type"],
-                        use_multipath=self.configuration.use_multipath_for_image_xfer,
-                        device_scan_attempts=self.configuration.num_volume_device_scan_tries,
-                        conn=attachment.connection_info,
-                    )
-                    LOG.debug(
-                        "Disconnecting source volume: " "%(connection)s",
-                        {"connection": attachment.connection_info},
-                    )
-                    connector.disconnect_volume(
-                        connection_properties=attachment.connection_info,
-                        device_info=attachment.connection_info,
-                        force=True,
-                    )
-                    rpcapi = volume_rpcapi.VolumeAPI()
-                    LOG.debug(
-                        "Calling RPC API to delete attachment %(attachment)s of volume %(volume)s",
-                        {"attachment": attachment, "volume": src_volume},
-                    )
-                    rpcapi.attachment_delete(
-                        ctxt,
-                        attachment.id,
-                        src_volume,
-                    )
+                    volume.admin_metadata.pop("dmclone:source", None)
+                    volume.save()
+                    src_volume = self._cleanup_clone_target(ctxt, volume)
                     LOG.debug(
                         "Calling RPC API to delete volume: %(volume)s",
                         {"volume": src_volume},
                     )
+                    rpcapi = volume_rpcapi.VolumeAPI()
                     rpcapi.delete_volume(ctxt, src_volume)
-
-                    volume.save()
 
     def _update_volume_stats(self):
         super(DMCloneVolumeDriver, self)._update_volume_stats()
@@ -460,16 +474,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     )
                     volume["status"] = "error"
                     volume.save()
-                    self._load_or_create_linear_target(volume)
-                    connector.disconnect_volume(
-                        attachment.connection_info["data"],
-                        src_volume_handle["path"],
-                        force=True,
-                        ignore_errors=True,
-                    )
-                    rpcapi.attachment_delete(ctxt, attachment.id, volume)
-                    self.vg_metadata.delete(self._metadata_dev_name(volume))
-                    super(DMCloneVolumeDriver, self).delete_volume(volume)
+                    self._cleanup_clone_target(ctxt, volume)
 
         if volume.admin_metadata.get("dmclone:hydration", False):
             LOG.debug("Starting transfer of volume %(volume)s", {"volume": volume})
@@ -861,32 +866,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     if connector["host"] == self.hostname:
                         # NOTE(jhorstmann): Data transfer has not started yet
                         # and everything may be cleaned up
-                        self._load_or_create_linear_target(volume)
-                        self.vg_metadata.delete(self._metadata_dev_name(volume))
-                        attachment = [
-                            attachment
-                            for attachment in src_volume.volume_attachment
-                            if (
-                                attachment.connection_info["driver_volume_type"]
-                                != "local"
-                                and attachment.attached_host == self.hostname
-                            )
-                        ][0]
-                        connector = volume_utils.brick_get_connector(
-                            attachment.connection_info["driver_volume_type"],
-                            use_multipath=self.configuration.use_multipath_for_image_xfer,
-                            device_scan_attempts=self.configuration.num_volume_device_scan_tries,
-                            conn=attachment.connection_info,
-                        )
-                        LOG.debug(
-                            "Disconnecting source volume: " "%(connection)s",
-                            {"connection": attachment.connection_info},
-                        )
-                        connector.disconnect_volume(
-                            connection_properties=attachment.connection_info,
-                            device_info=attachment.connection_info,
-                            force=True,
-                        )
+                        volume.admin_metadata.pop("dmclone:source", None)
+                        volume.admin_metadata.pop("dmclone:hydration", None)
+                        volume.save()
+                        src_volume = self._cleanup_clone_target(ctxt, volume)
                         self._switch_volumes(volume, src_volume)
                         LOG.debug(
                             "Calling RPC API to delete volume: " "%(volume)s",
@@ -894,9 +877,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         )
                         rpcapi = volume_rpcapi.VolumeAPI()
                         rpcapi.delete_volume(ctxt, src_volume)
-                        volume.admin_metadata.pop("dmclone:source", None)
-                        volume.admin_metadata.pop("dmclone:hydration", None)
-                        volume.save()
                     else:
                         # NOTE(jhorstmann): Disconnection on the remote host
                         # means live-migration has succeded and we need to
