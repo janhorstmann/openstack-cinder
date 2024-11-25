@@ -231,9 +231,22 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                             {"volume": src_volume, "handle": src_volume_handle},
                         )
 
-                        enable_hydration = volume.admin_metadata.get(
-                            "dmclone:hydration", False
-                        )
+                        if (
+                            len(
+                                [
+                                    attachment
+                                    for attachment in volume.volume_attachment
+                                    if attachment.attach_status
+                                    in ["attached", "detaching"]
+                                    and attachment.connection_info["driver_volume_type"]
+                                    == "local"
+                                ]
+                            )
+                            <= 1
+                        ):
+                            enable_hydration = True
+                        else:
+                            enable_hydration = False
                         self._load_or_create_clone_target(
                             volume,
                             src_volume_handle["path"],
@@ -369,7 +382,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     LOG.debug(
                         "Completing transfer for volume %(volume)s", {"volume": volume}
                     )
-                    volume.admin_metadata.pop("dmclone:hydration", None)
                     volume.admin_metadata.pop("dmclone:source", None)
                     volume.save()
                     src_volume = self._cleanup_clone_target(ctxt, volume)
@@ -464,7 +476,25 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     self.configuration.metadata_volume_size,
                 )
 
-                self._load_or_create_clone_target(volume, src_volume_handle["path"])
+                if (
+                    len(
+                        [
+                            attachment
+                            for attachment in src_volume.volume_attachment
+                            if attachment.attach_status in ["attached", "detaching"]
+                            and attachment.connection_info["driver_volume_type"]
+                            == "local"
+                        ]
+                    )
+                    == 0
+                ):
+                    enable_hydration = True
+                else:
+                    enable_hydration = False
+
+                self._load_or_create_clone_target(
+                    volume, src_volume_handle["path"], enable_hydration=enable_hydration
+                )
 
             except Exception:
                 with excutils.save_and_reraise_exception():
@@ -475,10 +505,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     volume["status"] = "error"
                     volume.save()
                     self._cleanup_clone_target(ctxt, volume)
-
-        if volume.admin_metadata.get("dmclone:hydration", False):
-            LOG.debug("Starting transfer of volume %(volume)s", {"volume": volume})
-            self.dmsetup.message(self._dm_target_name(volume), "0", "enable_hydration")
 
     def create_volume_from_snapshot(self, volume, snapshot):
         """Creates a volume from a snapshot.
@@ -722,20 +748,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 constants.VOLUME_BINARY,
             )
 
-            attachments = [
-                attachment
-                for attachment in volume.volume_attachment
-                if attachment.attach_status in ["attached", "detaching"]
-            ]
-            LOG.debug(
-                "Got attachments for volume %(id)s: %(attachments)s",
-                {"id": volume["id"], "attachments": attachments},
-            )
-
-            options = {"dmclone:source": volume.id}
-            if len(attachments) == 0:
-                options.update({"dmclone:hydration": True})
-
             new_volume = objects.Volume(
                 context=ctxt,
                 host=dst_service["host"],
@@ -749,7 +761,7 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                 project_id=volume.project_id,
                 display_name="transfer src for " + volume["id"],
                 display_description="transfer src for " + volume["id"],
-                admin_metadata=options,
+                admin_metadata={"dmclone:source": volume.id},
             )
 
             # TODO: Get lock for new_volume
@@ -812,9 +824,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             # NOTE(jhorstmann): 'dmclone:source' points to the wrong volume now, change that
             new_volume.admin_metadata.pop("dmclone:source", None)
             volume.admin_metadata.update({"dmclone:source": new_volume.id})
-            # NOTE(jhorstmann): Also move 'dmclone:hydration'
-            if new_volume.admin_metadata.pop("dmclone:hydration", False):
-                volume.admin_metadata.update({"dmclone:hydration": True})
             volume.save()
             new_volume.save()
 
@@ -832,7 +841,10 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         :param connector: A dictionary describing the connection with details
                           about the initiator. Can be None.
         """
-        LOG.debug("Terminating connection for volume %(volume)s", {"volume": volume})
+        LOG.debug(
+            "Terminating connection %(connector)s for volume %(volume)s",
+            {"connector": connector, "volume": volume},
+        )
         ctxt = context.get_admin_context()
         attachments = [
             attachment
@@ -843,31 +855,33 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             "Got attachments for volume %(id)s: %(attachments)s",
             {"id": volume["id"], "attachments": attachments},
         )
-        if (
-            len(attachments) == 1
-            and attachments[0].connection_info["driver_volume_type"] != "local"
-        ):
-            # NOTE(jhorstmann): Termination of non-local attachments.
-            # These are the terminations which actually need
-            # to be passed to the target driver
-            self.target_driver.terminate_connection(volume, connector)
-
-        else:
-            source = volume.admin_metadata.get("dmclone:source", None)
-            if source:
-                src_volume = objects.Volume.get_by_id(ctxt, source)
-                hydration = volume.admin_metadata.get("dmclone:hydration", False)
-                if not hydration:
-                    # The connector is required to decide what to do
-                    if not connector:
-                        raise exception.InvalidConnectorException(
-                            missing="Connector object is None"
-                        )
+        if len(attachments) == 1:
+            # NOTE(jhorstmann): There is nothing to do in case of single local
+            # connections
+            if attachments[0].connection_info["driver_volume_type"] != "local":
+                # NOTE(jhorstmann): Termination of non-local attachments.
+                # These are the terminations which actually need
+                # to be passed to the target driver
+                self.target_driver.terminate_connection(volume, connector, **kwargs)
+        elif connector:
+            dm_status = self.dmsetup.status(self._dm_target_name(volume))
+            if dm_status[2] == "clone":
+                # NOTE(jhorstmann): Status output for clone target described in
+                # https://docs.kernel.org/admin-guide/device-mapper/dm-clone.html#status
+                # E.g.:
+                # 0 2097152 clone 8 14/1024 8 0/262144 0 1 no_hydration 4 hydration_threshold 1 hydration_batch_size 1 rw
+                hydrated = dm_status[6].split("/")
+                if (
+                    hydrated[0] == "0"
+                    and dm_status[7] == "0"
+                    and "no_hydration" in dm_status[9:]
+                ):
+                    # NOTE(jhorstmann): Data transfer has not started yet
+                    # and everything may be cleaned up
                     if connector["host"] == self.hostname:
                         # NOTE(jhorstmann): Data transfer has not started yet
                         # and everything may be cleaned up
                         volume.admin_metadata.pop("dmclone:source", None)
-                        volume.admin_metadata.pop("dmclone:hydration", None)
                         volume.save()
                         src_volume = self._cleanup_clone_target(ctxt, volume)
                         self._switch_volumes(volume, src_volume)
@@ -881,8 +895,9 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                         # NOTE(jhorstmann): Disconnection on the remote host
                         # means live-migration has succeded and we need to
                         # start hydration
-                        volume.admin_metadata.update({"dmclone:hydration": True})
-                        volume.save()
+                        LOG.debug(
+                            "Starting transfer of volume %(volume)s", {"volume": volume}
+                        )
                         self.dmsetup.message(
                             self._dm_target_name(volume), "0", "enable_hydration"
                         )
