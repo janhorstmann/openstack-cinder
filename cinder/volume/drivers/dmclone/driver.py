@@ -19,7 +19,6 @@ import time
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_service import loopingcall
-from oslo_utils import excutils
 
 from cinder.brick.local_dev import lvm as brick_lvm
 from cinder.common import constants
@@ -55,6 +54,12 @@ driver_opts = [
         "hydration_monitor_interval",
         default=10,
         help="Intervall to the hydration monitor, which finishes volume transfer",
+    ),
+    cfg.IntOpt(
+        "transfer_create_volume_timeout_secs",
+        default=300,
+        help="Timeout for creating the destination volume "
+        "when performing volume transfer (seconds)",
     ),
     cfg.IntOpt(
         "clone_region_size",
@@ -496,15 +501,14 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
                     volume, src_volume_handle["path"], enable_hydration=enable_hydration
                 )
 
-            except Exception:
-                with excutils.save_and_reraise_exception():
-                    LOG.exception(
-                        "Failed to create transfer volume: %(volume)s",
-                        {"volume": volume},
-                    )
-                    volume["status"] = "error"
-                    volume.save()
-                    self._cleanup_clone_target(ctxt, volume)
+            except Exception as exc:
+                LOG.exception(
+                    "Failed to create transfer volume: %(volume)s",
+                    {"volume": volume},
+                )
+                self._cleanup_clone_target(ctxt, volume)
+                self.delete_volume(volume)
+                raise exc
 
     def create_volume_from_snapshot(self, volume, snapshot):
         """Creates a volume from a snapshot.
@@ -520,6 +524,18 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
 
     def delete_volume(self, volume):
         LOG.debug("Deleting volume: %(volume)s", {"volume": volume})
+        dm_status = self.dmsetup.status(self._dm_target_name(volume))
+        if dm_status[2] == "clone":
+            volume.admin_metadata.pop("dmclone:source", None)
+            volume.save()
+            ctxt = context.get_admin_context()
+            src_volume = self._cleanup_clone_target(ctxt, volume)
+            LOG.debug(
+                "Calling RPC API to delete source volume: " "%(volume)s",
+                {"volume": src_volume},
+            )
+            rpcapi = volume_rpcapi.VolumeAPI()
+            rpcapi.delete_volume(ctxt, src_volume)
         self.dmsetup.remove(self._dm_target_name(volume))
         super(DMCloneVolumeDriver, self).delete_volume(volume)
 
@@ -780,32 +796,20 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
             )
 
             # Wait for new_volume to become ready
-            deadline = time.time() + 60
+            deadline = (
+                time.time() + self.configuration.transfer_create_volume_timeout_secs
+            )
             new_volume.refresh()
             tries = 0
             while new_volume.status != "available":
                 tries += 1
                 if time.time() > deadline or new_volume.status == "error":
-                    try:
-                        rpcapi.delete_volume(ctxt, new_volume)
-                    except exception.VolumeNotFound:
-                        LOG.info(
-                            "Could not find the temporary volume "
-                            "%(vol)s in the database. There is no need "
-                            "to clean up this volume.",
-                            {"vol": new_volume.id},
-                        )
-
+                    # NOTE(jhorstmann): We cannot do any meaningful cleanup of
+                    # remote driver volumes here
                     new_volume.destroy()
-                    LOG.debug("Updated volume: %(volume)s ", {"volume": volume})
-                    if new_volume.status == "error":
-                        raise exception.VolumeMigrationFailed(
-                            reason="Error creating remote volume"
-                        )
-                    else:
-                        raise exception.VolumeMigrationFailed(
-                            reason="Timeout waiting for remote volume creation"
-                        )
+                    raise exception.VolumeDriverException(
+                        message="Timeout or error creating remote volume"
+                    )
                 else:
                     time.sleep(tries**2)
                 new_volume.refresh()
