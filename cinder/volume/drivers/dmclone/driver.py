@@ -541,8 +541,87 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
 
     def create_snapshot(self, snapshot):
         """Creates a snapshot."""
-        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
-        raise NotImplementedError()
+        # Create COW device
+        ctxt = context.get_admin_context()
+        rpcapi = volume_rpcapi.VolumeAPI()
+        cow_volume = objects.Volume(
+            context=ctxt,
+            host=snapshot.volume.host,
+            availability_zone=snapshot.volume.availability_zone,
+            status="creating",
+            attach_status=objects.fields.VolumeAttachStatus.DETACHED,
+            cluster_name=snapshot.volume.cluster_name,
+            use_quota=False,  # Don't use quota for snapshot volume
+            size=snapshot.volume.size,
+            user_id=snapshot.volume.user_id,
+            project_id=snapshot.volume.project_id,
+            display_name="Snapshot COW volume for snapshot " + snapshot.id,
+            display_description="Snapshot COW volume for snapshot " + snapshot.id,
+        )
+
+        cow_volume.create()
+        rpcapi.create_volume(ctxt, cow_volume, None, None, allow_reschedule=False)
+        LOG.debug(
+            "Waiting for creation of COW volume: %(volume)s", {"volume": cow_volume}
+        )
+
+        # Wait for cow_volume to become ready
+        deadline = time.time() + self.configuration.transfer_create_volume_timeout_secs
+        cow_volume.refresh()
+        tries = 0
+        while cow_volume.status != "available":
+            tries += 1
+            if time.time() > deadline or cow_volume.status == "error":
+                self.delete_volume(cow_volume)
+                cow_volume.destroy()
+                raise exception.VolumeDriverException(
+                    message="Timeout or error creating COW volume"
+                )
+            else:
+                time.sleep(tries**2)
+            cow_volume.refresh()
+
+        snapshot.provider_id = cow_volume.id
+        snapshot.save()
+
+        # Create snapshot-origin if it has not been done yet
+        dm_status = self.dmsetup.status(self._dm_target_name(snapshot.volume))
+        if dm_status[2] != "snapshot-origin":
+            dm_real_table = self.dmsetup.table(self._dm_target_name(snapshot.volume))
+            self.dmsetup.suspend(self._dm_target_name(snapshot.volume))
+            self.dmsetup.create(
+                self._dm_target_name(snapshot.volume) + "-real", " ".join(dm_real_table)
+            )
+            self.dmsetup.load(
+                self._dm_target_name(snapshot.volume),
+                " ".join(
+                    [
+                        "0",
+                        str(snapshot.volume["size"] * 2097152),
+                        "snapshot-origin",
+                        "/dev/mapper/"
+                        + self._dm_target_name(snapshot.volume)
+                        + "-real",
+                    ]
+                ),
+            )
+            self.dmsetup.resume(self._dm_target_name(snapshot.volume))
+
+        # Create snapshot device
+        self.dmsetup.create(
+            snapshot.name,
+            " ".join(
+                [
+                    "0",
+                    str(snapshot.volume["size"] * 2097152),
+                    "snapshot",
+                    "/dev/mapper/" + self._dm_target_name(snapshot.volume) + "-real",
+                    self._dm_target_name(cow_volume),
+                    "P",
+                    "8",
+                ]
+            ),
+        )
 
     def delete_snapshot(self, snapshot):
         """Deletes a snapshot.
@@ -550,8 +629,26 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         If the driver uses custom file locks they should be cleaned on success
         using cinder.utils.synchronized_remove
         """
-        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
-        raise NotImplementedError()
+        ctxt = context.get_admin_context()
+        cow_volume = objects.Volume.get_by_id(ctxt, snapshot.provider_id)
+        snapshots = objects.Snapshot.get_by_all_for_volume(ctxt, snapshot.volume_id)
+        rpcapi = volume_rpcapi.VolumeAPI()
+        self.dmsetup.remove(
+            snapshot.name,
+        )
+        rpcapi.delete_volume(ctxt, cow_volume)
+        if len(snapshots) <= 1:
+            dm_status = self.dmsetup.status(self._dm_target_name(snapshot.volume))
+            if dm_status[2] == "snapshot-origin":
+                dm_real_table = self.dmsetup.table(
+                    self._dm_target_name(snapshot.volume) + "-real"
+                )
+                self.dmsetup.suspend(self._dm_target_name(snapshot.volume))
+                self.dmsetup.load(
+                    self._dm_target_name(snapshot.volume), " ".join(dm_real_table)
+                )
+                self.dmsetup.resume(self._dm_target_name(snapshot.volume))
+                self.dmsetup.remove(self._dm_target_name(snapshot.volume) + "-real")
 
     def copy_image_to_volume(
         self, context, volume, image_service, image_id, disable_sparse=False
@@ -673,9 +770,6 @@ class DMCloneVolumeDriver(lvm.LVMVolumeDriver):
         the volume during the process, it should extend the
         volume internally.
         """
-        # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
-        msg = _("Revert volume to snapshot not implemented.")
-        raise NotImplementedError(msg)
 
     def manage_existing_get_size(self, volume, existing_ref):
         # NOTE(jhorstmann): This is implemented by the lvm driver. It is not yet supported here
